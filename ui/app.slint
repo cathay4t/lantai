@@ -1,0 +1,385 @@
+import { ScrollView, Slider, Button, CheckBox } from "std-widgets.slint";
+
+export struct Block {
+    kind: int,
+    level: int,
+    styled: styled-text,
+    image: image,
+    has-image: bool,
+}
+
+component ColorChannels inherits VerticalLayout {
+    in property <string> name;
+    in property <color> text-color;
+    in-out property <float> r;
+    in-out property <float> g;
+    in-out property <float> b;
+    callback changed;
+
+    alignment: start;
+    spacing: 2px;
+
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: root.name;
+            color: root.text-color;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            width: 18px;
+            height: 18px;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #808080;
+            background: rgb(root.r, root.g, root.b);
+        }
+    }
+    HorizontalLayout {
+        spacing: 4px;
+        Slider {
+            value: root.r;
+            minimum: 0;
+            maximum: 255;
+            changed => {
+                root.r = self.value;
+                root.changed();
+            }
+        }
+        Slider {
+            value: root.g;
+            minimum: 0;
+            maximum: 255;
+            changed => {
+                root.g = self.value;
+                root.changed();
+            }
+        }
+        Slider {
+            value: root.b;
+            minimum: 0;
+            maximum: 255;
+            changed => {
+                root.b = self.value;
+                root.changed();
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    in property <[Block]> blocks;
+    in property <string> doc-title: "lantai";
+
+    in-out property <length> font-size: 19px;
+    in-out property <bool> dark: true;
+    in-out property <bool> custom-fg: false;
+    in-out property <bool> custom-bg: false;
+    in-out property <float> fg-r: 212;
+    in-out property <float> fg-g: 212;
+    in-out property <float> fg-b: 212;
+    in-out property <float> bg-r: 0;
+    in-out property <float> bg-g: 0;
+    in-out property <float> bg-b: 0;
+    in-out property <float> accent-r: 79;
+    in-out property <float> accent-g: 123;
+    in-out property <float> accent-b: 208;
+    in-out property <bool> settings-open: false;
+
+    callback settings-changed;
+    callback reload-requested;
+    callback open-link(string);
+
+    property <color> fg: custom-fg ? rgb(fg-r, fg-g, fg-b) : (dark ? #d4d4d4 : #242424);
+    property <color> bg: custom-bg ? rgb(bg-r, bg-g, bg-b) : (dark ? #000000 : #ffffff);
+    property <color> accent: rgb(accent-r, accent-g, accent-b);
+    property <color> code-bg: dark ? bg.brighter(0.14) : bg.darker(0.06);
+    property <color> panel-bg: dark ? #1e1e1e : #f2f2f2;
+    property <color> border: fg.mix(bg, 0.75);
+
+    title: doc-title;
+    background: bg;
+    default-font-size: font-size;
+    forward-focus: keys;
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.F5) {
+                root.reload-requested();
+                accept
+            } else {
+                reject
+            }
+        }
+
+        ScrollView {
+            width: 100%;
+            height: 100%;
+
+            VerticalLayout {
+                width: root.width;
+                alignment: start;
+                padding: 18px;
+                spacing: 10px;
+
+                for block in blocks: VerticalLayout {
+                    width: parent.width;
+                    alignment: start;
+
+                    if block.kind == 1: StyledText {
+                        width: parent.width;
+                        text: block.styled;
+                        default-color: root.fg;
+                        link-color: root.accent;
+                        link-clicked(link) => { root.open-link(link); }
+                        default-font-size: root.font-size * (block.level <= 1 ? 1.7 : block.level == 2 ? 1.45 : 1.2);
+                    }
+                    if block.kind == 2: Rectangle {
+                        background: root.code-bg;
+                        border-radius: 6px;
+                        VerticalLayout {
+                            padding: 10px;
+                            alignment: start;
+                            StyledText {
+                                width: parent.width;
+                                text: block.styled;
+                                default-color: root.fg;
+                                link-color: root.accent;
+                                link-clicked(link) => { root.open-link(link); }
+                                default-font-family: "monospace";
+                                default-font-size: root.font-size * 0.92;
+                            }
+                        }
+                    }
+                    if block.kind == 3: StyledText {
+                        width: parent.width;
+                        text: block.styled;
+                        default-color: root.fg;
+                        link-color: root.accent;
+                        link-clicked(link) => { root.open-link(link); }
+                        default-font-size: root.font-size;
+                    }
+                    if block.kind == 4: Rectangle {
+                        background: transparent;
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 10px;
+                            Rectangle {
+                                width: 3px;
+                                background: root.accent;
+                            }
+                            StyledText {
+                                width: parent.width - 13px;
+                                text: block.styled;
+                                default-color: root.fg.mix(root.bg, 0.3);
+                                link-color: root.accent;
+                                link-clicked(link) => { root.open-link(link); }
+                                default-font-size: root.font-size;
+                            }
+                        }
+                    }
+                    if block.kind == 5: Rectangle {
+                        height: 1px;
+                        background: root.border;
+                    }
+                    if block.kind == 6: Rectangle {
+                        background: root.code-bg;
+                        border-radius: 6px;
+                        VerticalLayout {
+                            padding: 10px;
+                            alignment: start;
+                            StyledText {
+                                width: parent.width;
+                                text: block.styled;
+                                default-color: root.fg;
+                                link-color: root.accent;
+                                link-clicked(link) => { root.open-link(link); }
+                                default-font-family: "monospace";
+                                default-font-size: root.font-size * 0.92;
+                            }
+                        }
+                    }
+                    if block.kind == 7 && block.has-image: Image {
+                        source: block.image;
+                        width: parent.width;
+                        image-fit: contain;
+                        max-height: 640px;
+                    }
+                    if block.kind == 0: StyledText {
+                        width: parent.width;
+                        text: block.styled;
+                        default-color: root.fg;
+                        link-color: root.accent;
+                        link-clicked(link) => { root.open-link(link); }
+                        default-font-size: root.font-size;
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        x: root.width - self.width - 14px;
+        y: 14px;
+        width: 38px;
+        height: 38px;
+        border-radius: 19px;
+        background: root.panel-bg;
+        border-width: 1px;
+        border-color: root.border;
+        Text {
+            text: "⚙";
+            color: root.fg;
+            font-size: 18px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            clicked => {
+                root.settings-open = !root.settings-open;
+            }
+        }
+    }
+
+    if root.settings-open: Rectangle {
+        x: root.width - self.width;
+        y: 0;
+        width: 330px;
+        height: root.height;
+        background: root.panel-bg;
+        border-width: 1px;
+        border-color: root.border;
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+            alignment: start;
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "Settings";
+                    color: root.fg;
+                    font-size: root.font-size * 1.3;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                Button {
+                    text: "Close";
+                    clicked => {
+                        root.settings-open = false;
+                    }
+                }
+            }
+
+            Text {
+                text: "Font size: " + round(root.font-size / 1px) + " px";
+                color: root.fg;
+            }
+            Slider {
+                value: root.font-size / 1px;
+                minimum: 8;
+                maximum: 48;
+                changed => {
+                    root.font-size = self.value * 1px;
+                    root.settings-changed();
+                }
+            }
+
+            Text {
+                text: "Theme";
+                color: root.fg;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Button {
+                    text: "Dark";
+                    checkable: true;
+                    checked: root.dark;
+                    clicked => {
+                        root.dark = true;
+                        root.settings-changed();
+                    }
+                }
+                Button {
+                    text: "Light";
+                    checkable: true;
+                    checked: !root.dark;
+                    clicked => {
+                        root.dark = false;
+                        root.settings-changed();
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                Button {
+                    text: "Reload";
+                    clicked => {
+                        root.reload-requested();
+                    }
+                }
+            }
+
+            CheckBox {
+                text: "Custom text color";
+                checked: root.custom-fg;
+                toggled => {
+                    root.custom-fg = self.checked;
+                    root.settings-changed();
+                }
+            }
+            if root.custom-fg: ColorChannels {
+                name: "Text RGB";
+                text-color: root.fg;
+                r: root.fg-r;
+                g: root.fg-g;
+                b: root.fg-b;
+                changed => {
+                    root.fg-r = self.r;
+                    root.fg-g = self.g;
+                    root.fg-b = self.b;
+                    root.settings-changed();
+                }
+            }
+
+            CheckBox {
+                text: "Custom background";
+                checked: root.custom-bg;
+                toggled => {
+                    root.custom-bg = self.checked;
+                    root.settings-changed();
+                }
+            }
+            if root.custom-bg: ColorChannels {
+                name: "Background RGB";
+                text-color: root.fg;
+                r: root.bg-r;
+                g: root.bg-g;
+                b: root.bg-b;
+                changed => {
+                    root.bg-r = self.r;
+                    root.bg-g = self.g;
+                    root.bg-b = self.b;
+                    root.settings-changed();
+                }
+            }
+
+            ColorChannels {
+                name: "Accent RGB";
+                text-color: root.fg;
+                r: root.accent-r;
+                g: root.accent-g;
+                b: root.accent-b;
+                changed => {
+                    root.accent-r = self.r;
+                    root.accent-g = self.g;
+                    root.accent-b = self.b;
+                    root.settings-changed();
+                }
+            }
+        }
+    }
+}
