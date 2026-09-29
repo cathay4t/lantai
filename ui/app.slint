@@ -4,6 +4,7 @@ export struct Block {
     kind: int,
     level: int,
     styled: styled-text,
+    text: string,
     image: image,
     has-image: bool,
 }
@@ -67,6 +68,28 @@ component ColorChannels inherits VerticalLayout {
     }
 }
 
+component SelectableText inherits TextInput {
+    in property <color> text-color: #000000;
+    in property <color> selection-color: #4f7bd0;
+    in property <length> text-size: 16px;
+    in property <string> text-family: "";
+    // The code block underlay renders the text; the input on top only shows
+    // the selection, so its own text must stay invisible.
+    in property <bool> hide-text: false;
+
+    width: 100%;
+    read-only: true;
+    single-line: false;
+    wrap: word-wrap;
+    // A viewer has nothing to type, so don't show a blinking caret.
+    text-cursor-width: 0px;
+    color: hide-text ? transparent : text-color;
+    selection-background-color: selection-color;
+    selection-foreground-color: hide-text ? transparent : text-color;
+    font-size: text-size;
+    font-family: text-family;
+}
+
 export component AppWindow inherits Window {
     in property <[Block]> blocks;
     in property <string> doc-title: "lantai";
@@ -93,6 +116,7 @@ export component AppWindow inherits Window {
     property <color> fg: custom-fg ? rgb(fg-r, fg-g, fg-b) : (dark ? #d4d4d4 : #242424);
     property <color> bg: custom-bg ? rgb(bg-r, bg-g, bg-b) : (dark ? #000000 : #ffffff);
     property <color> accent: rgb(accent-r, accent-g, accent-b);
+    property <color> selection: accent.with-alpha(0.4);
     property <color> code-bg: dark ? bg.brighter(0.14) : bg.darker(0.06);
     property <color> panel-bg: dark ? #1e1e1e : #f2f2f2;
     property <color> border: fg.mix(bg, 0.75);
@@ -115,6 +139,10 @@ export component AppWindow inherits Window {
         ScrollView {
             width: 100%;
             height: 100%;
+            // Keep the content sized to the visible viewport so wrapped text
+            // never overflows sideways and no horizontal scrollbar shows up.
+            content-width: self.visible-width;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
             VerticalLayout {
                 width: root.width;
@@ -123,16 +151,13 @@ export component AppWindow inherits Window {
                 spacing: 10px;
 
                 for block in blocks: VerticalLayout {
-                    width: parent.width;
                     alignment: start;
 
-                    if block.kind == 1: StyledText {
-                        width: parent.width;
-                        text: block.styled;
-                        default-color: root.fg;
-                        link-color: root.accent;
-                        link-clicked(link) => { root.open-link(link); }
-                        default-font-size: root.font-size * (block.level <= 1 ? 1.7 : block.level == 2 ? 1.45 : 1.2);
+                    if block.kind == 1: SelectableText {
+                        text: block.text;
+                        text-color: root.fg;
+                        selection-color: root.selection;
+                        text-size: root.font-size * (block.level <= 1 ? 1.7 : block.level == 2 ? 1.45 : 1.2);
                     }
                     if block.kind == 2: Rectangle {
                         background: root.code-bg;
@@ -140,24 +165,38 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             padding: 10px;
                             alignment: start;
-                            StyledText {
-                                width: parent.width;
-                                text: block.styled;
-                                default-color: root.fg;
-                                link-color: root.accent;
-                                link-clicked(link) => { root.open-link(link); }
-                                default-font-family: "monospace";
-                                default-font-size: root.font-size * 0.92;
+                            Rectangle {
+                                // The highlighted text defines the height; the
+                                // transparent input on top handles selection.
+                                height: code-text.preferred-height;
+                                code-text := StyledText {
+                                    x: 0;
+                                    y: 0;
+                                    width: parent.width;
+                                    text: block.styled;
+                                    default-color: root.fg;
+                                    default-font-family: "monospace";
+                                    default-font-size: root.font-size * 0.92;
+                                }
+                                SelectableText {
+                                    x: 0;
+                                    y: 0;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: block.text;
+                                    hide-text: true;
+                                    selection-color: root.selection;
+                                    text-size: root.font-size * 0.92;
+                                    text-family: "monospace";
+                                }
                             }
                         }
                     }
-                    if block.kind == 3: StyledText {
-                        width: parent.width;
-                        text: block.styled;
-                        default-color: root.fg;
-                        link-color: root.accent;
-                        link-clicked(link) => { root.open-link(link); }
-                        default-font-size: root.font-size;
+                    if block.kind == 3: SelectableText {
+                        text: block.text;
+                        text-color: root.fg;
+                        selection-color: root.selection;
+                        text-size: root.font-size;
                     }
                     if block.kind == 4: Rectangle {
                         background: transparent;
@@ -168,13 +207,12 @@ export component AppWindow inherits Window {
                                 width: 3px;
                                 background: root.accent;
                             }
-                            StyledText {
+                            SelectableText {
                                 width: parent.width - 13px;
-                                text: block.styled;
-                                default-color: root.fg.mix(root.bg, 0.3);
-                                link-color: root.accent;
-                                link-clicked(link) => { root.open-link(link); }
-                                default-font-size: root.font-size;
+                                text: block.text;
+                                text-color: root.fg.mix(root.bg, 0.3);
+                                selection-color: root.selection;
+                                text-size: root.font-size;
                             }
                         }
                     }
@@ -188,30 +226,25 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             padding: 10px;
                             alignment: start;
-                            StyledText {
-                                width: parent.width;
-                                text: block.styled;
-                                default-color: root.fg;
-                                link-color: root.accent;
-                                link-clicked(link) => { root.open-link(link); }
-                                default-font-family: "monospace";
-                                default-font-size: root.font-size * 0.92;
+                            SelectableText {
+                                text: block.text;
+                                text-color: root.fg;
+                                selection-color: root.selection;
+                                text-size: root.font-size * 0.92;
+                                text-family: "monospace";
                             }
                         }
                     }
                     if block.kind == 7 && block.has-image: Image {
                         source: block.image;
-                        width: parent.width;
                         image-fit: contain;
                         max-height: 640px;
                     }
-                    if block.kind == 0: StyledText {
-                        width: parent.width;
-                        text: block.styled;
-                        default-color: root.fg;
-                        link-color: root.accent;
-                        link-clicked(link) => { root.open-link(link); }
-                        default-font-size: root.font-size;
+                    if block.kind == 0: SelectableText {
+                        text: block.text;
+                        text-color: root.fg;
+                        selection-color: root.selection;
+                        text-size: root.font-size;
                     }
                 }
             }
