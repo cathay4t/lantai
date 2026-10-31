@@ -1,4 +1,4 @@
-import { ScrollView, Slider, Button, CheckBox } from "std-widgets.slint";
+import { ScrollView, Slider, Button, CheckBox, LineEdit } from "std-widgets.slint";
 
 export struct Block {
     kind: int,
@@ -151,6 +151,78 @@ export component AppWindow inherits Window {
     in-out property <float> accent-g: 123;
     in-out property <float> accent-b: 208;
     in-out property <bool> settings-open: false;
+    in-out property <bool> search-open: false;
+    in-out property <string> search-query: "";
+    in-out property <string> search-status: "";
+    in-out property <int> measure-tick: 0;
+
+    property <length> line-step: root.font-size * 1.5;
+
+    // Sampling block positions has to happen after layout, hence the timer.
+    measure-timer := Timer {
+        interval: 30ms;
+        running: false;
+        triggered => {
+            measure-tick += 1;
+            self.running = false;
+        }
+    }
+
+    function refresh-block-positions() {
+        if !measure-timer.running {
+            measure-timer.running = true;
+        }
+    }
+
+    changed blocks => {
+        refresh-block-positions();
+    }
+    changed width => {
+        refresh-block-positions();
+    }
+    changed height => {
+        refresh-block-positions();
+    }
+    changed font-size => {
+        refresh-block-positions();
+    }
+
+    // Keeps the content-y offset between the top (0) and the bottom.
+    function max-scroll() -> length {
+        return max(scroll.content-height - scroll.visible-height, 0px);
+    }
+
+    public function scroll-down() {
+        scroll.content-y = max(scroll.content-y - line-step, -max-scroll());
+    }
+
+    public function scroll-up() {
+        scroll.content-y = min(scroll.content-y + line-step, 0px);
+    }
+
+    public function scroll-to-top() {
+        scroll.content-y = 0px;
+    }
+
+    public function scroll-to-bottom() {
+        scroll.content-y = -max-scroll();
+    }
+
+    public function scroll-to-position(y: length) {
+        scroll.content-y = clamp(-y, -max-scroll(), 0px);
+    }
+
+    public function open-search() {
+        search-query = "";
+        search-status = "";
+        search-open = true;
+    }
+
+    public function close-search() {
+        search-open = false;
+        search-status = "";
+        keys.focus();
+    }
 
     pure function alert-label(level: int) -> string {
         if level == 1 { return "Note"; }
@@ -171,6 +243,9 @@ export component AppWindow inherits Window {
     callback settings-changed;
     callback reload-requested;
     callback open-link(string);
+    callback quit-requested;
+    callback search-requested(string, bool);
+    callback block-positioned(int, length);
 
     property <color> fg: custom-fg ? rgb(fg-r, fg-g, fg-b) : (dark ? #d4d4d4 : #242424);
     property <color> bg: custom-bg ? rgb(bg-r, bg-g, bg-b) : (dark ? #000000 : #ffffff);
@@ -186,16 +261,55 @@ export component AppWindow inherits Window {
     forward-focus: keys;
 
     keys := FocusScope {
+        property <bool> pending-g: false;
+
         key-pressed(event) => {
-            if (event.text == Key.F5) {
+            if (root.search-open) {
+                if (event.text == Key.Escape) {
+                    root.close-search();
+                    accept
+                } else {
+                    reject
+                }
+            } else if (event.text == "q") {
+                pending-g = false;
+                root.quit-requested();
+                accept
+            } else if (event.text == "j") {
+                pending-g = false;
+                root.scroll-down();
+                accept
+            } else if (event.text == "k") {
+                pending-g = false;
+                root.scroll-up();
+                accept
+            } else if (event.text == "G") {
+                pending-g = false;
+                root.scroll-to-bottom();
+                accept
+            } else if (event.text == "g") {
+                if (pending-g) {
+                    pending-g = false;
+                    root.scroll-to-top();
+                } else {
+                    pending-g = true;
+                }
+                accept
+            } else if (event.text == "/") {
+                pending-g = false;
+                root.open-search();
+                accept
+            } else if (event.text == Key.F5) {
+                pending-g = false;
                 root.reload-requested();
                 accept
             } else {
+                pending-g = false;
                 reject
             }
         }
 
-        ScrollView {
+        scroll := ScrollView {
             width: 100%;
             height: 100%;
             // Keep the content sized to the visible viewport so wrapped text
@@ -209,8 +323,15 @@ export component AppWindow inherits Window {
                 padding: 18px;
                 spacing: 10px;
 
-                for block in blocks: VerticalLayout {
+                for block[index] in blocks: VerticalLayout {
                     alignment: start;
+                    // Layout geometry changes don't emit change notifications,
+                    // so sample each block's position whenever the root asks
+                    // for a fresh measurement (after load, resize, font change).
+                    property <int> measure: root.measure-tick;
+                    changed measure => {
+                        root.block-positioned(index, self.y);
+                    }
 
                     if block.kind == 1: RichText {
                         plain: block.text;
@@ -518,6 +639,64 @@ export component AppWindow inherits Window {
                     root.accent-g = self.g;
                     root.accent-b = self.b;
                     root.settings-changed();
+                }
+            }
+        }
+    }
+
+    if root.search-open: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 14px;
+        width: min(root.width - 28px, 560px);
+        height: 48px;
+        background: root.panel-bg;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: root.border;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 6px;
+            spacing: 8px;
+
+            Text {
+                text: "/";
+                color: root.fg;
+                font-size: root.font-size;
+                vertical-alignment: center;
+            }
+
+            search-input := LineEdit {
+                text <=> root.search-query;
+                placeholder-text: "Search";
+                accepted(text) => {
+                    root.search-requested(text, true);
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.close-search();
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+                init => {
+                    self.focus();
+                }
+            }
+
+            Text {
+                text: root.search-status;
+                color: root.fg.mix(root.bg, 0.4);
+                font-size: root.font-size * 0.85;
+                vertical-alignment: center;
+                visible: !root.search-status.is-empty;
+            }
+
+            Button {
+                text: "✕";
+                clicked => {
+                    root.close-search();
                 }
             }
         }

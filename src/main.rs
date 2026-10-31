@@ -22,9 +22,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let settings = Settings::load();
     let viewer = Rc::new(RefCell::new(Viewer::new(path, settings)));
+    let block_positions = Rc::new(RefCell::new(Vec::<f32>::new()));
 
     {
-        let viewer = viewer.borrow();
+        let mut viewer = viewer.borrow_mut();
         viewer.apply_to_ui(&ui);
         viewer.update_blocks(&ui);
         ui.set_doc_title(viewer.title().into());
@@ -52,6 +53,41 @@ fn main() -> Result<(), slint::PlatformError> {
             return;
         };
         state.borrow_mut().reload(&ui);
+    });
+
+    let state = Rc::clone(&block_positions);
+    ui.on_block_positioned(move |index, y| {
+        let index = index.max(0) as usize;
+        let mut positions = state.borrow_mut();
+        if positions.len() <= index {
+            positions.resize(index + 1, 0.0);
+        }
+        positions[index] = y;
+    });
+
+    let weak = ui.as_weak();
+    let state = Rc::clone(&viewer);
+    let positions = Rc::clone(&block_positions);
+    ui.on_search_requested(move |query, forward| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let result = state.borrow_mut().search(query.as_str(), forward);
+        match result {
+            Some((index, ordinal, total)) => {
+                ui.set_search_status(format!("{ordinal}/{total}").into());
+                if let Some(&y) = positions.borrow().get(index) {
+                    ui.invoke_scroll_to_position(y);
+                }
+            }
+            None => ui.set_search_status("no matches".into()),
+        }
+    });
+
+    let state = Rc::clone(&viewer);
+    ui.on_quit_requested(move || {
+        state.borrow().settings.save();
+        let _ = slint::quit_event_loop();
     });
 
     ui.on_open_link(|url| {
@@ -231,6 +267,9 @@ struct Viewer {
     path: PathBuf,
     document: Result<String, String>,
     settings: Settings,
+    block_texts: Vec<String>,
+    search_query: String,
+    search_from: Option<usize>,
 }
 
 impl Viewer {
@@ -240,6 +279,9 @@ impl Viewer {
             path,
             document,
             settings,
+            block_texts: Vec::new(),
+            search_query: String::new(),
+            search_from: None,
         }
     }
 
@@ -274,7 +316,7 @@ impl Viewer {
         ui.set_bg_b(f32::from(bg_b));
     }
 
-    fn update_blocks(&self, ui: &AppWindow) {
+    fn update_blocks(&mut self, ui: &AppWindow) {
         let dark = self.settings.theme == Theme::Dark;
         let base_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
         let blocks = match &self.document {
@@ -285,12 +327,64 @@ impl Viewer {
                 ))]
             }
         };
+        self.block_texts =
+            blocks.iter().map(|block| block.text.to_string()).collect();
+        self.search_query.clear();
+        self.search_from = None;
         ui.set_blocks(ModelRc::new(VecModel::from(blocks)));
     }
 
     fn reload(&mut self, ui: &AppWindow) {
         self.document = load(&self.path);
         self.update_blocks(ui);
+    }
+
+    /// Finds the next block containing `query` in the requested direction and
+    /// returns `(block index, match ordinal, total matches)`.
+    fn search(
+        &mut self,
+        query: &str,
+        forward: bool,
+    ) -> Option<(usize, usize, usize)> {
+        if query != self.search_query {
+            self.search_query = query.to_owned();
+            self.search_from = None;
+        }
+        let needle = query.to_lowercase();
+        if needle.is_empty() || self.block_texts.is_empty() {
+            return None;
+        }
+
+        let matches: Vec<bool> = self
+            .block_texts
+            .iter()
+            .map(|text| text.to_lowercase().contains(&needle))
+            .collect();
+        let total = matches.iter().filter(|matched| **matched).count();
+        if total == 0 {
+            return None;
+        }
+
+        let count = matches.len();
+        let start = match (self.search_from, forward) {
+            (None, true) => 0,
+            (None, false) => count - 1,
+            (Some(index), true) => (index + 1) % count,
+            (Some(index), false) => (index + count - 1) % count,
+        };
+        let index = (0..count).find_map(|offset| {
+            let index = if forward {
+                (start + offset) % count
+            } else {
+                (start + count - offset) % count
+            };
+            matches[index].then_some(index)
+        })?;
+
+        self.search_from = Some(index);
+        let ordinal =
+            matches[..=index].iter().filter(|matched| **matched).count();
+        Some((index, ordinal, total))
     }
 }
 
