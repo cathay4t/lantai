@@ -3,7 +3,7 @@ use std::{borrow::Cow, ops::Range, path::Path, sync::OnceLock};
 use pulldown_cmark::{
     BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd,
 };
-use slint::{Image, StyledText};
+use slint::{Image, ModelRc, StyledText, VecModel};
 use syntect::{
     easy::HighlightLines,
     highlighting::{Theme, ThemeSet},
@@ -12,7 +12,7 @@ use syntect::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::Block;
+use crate::{Block, TableCell, TableRow};
 
 pub const KIND_PARAGRAPH: i32 = 0;
 pub const KIND_HEADING: i32 = 1;
@@ -39,6 +39,7 @@ pub fn plain_block(text: &str) -> Block {
         text: text.into(),
         image: Image::default(),
         has_image: false,
+        table: Default::default(),
     }
 }
 
@@ -235,6 +236,7 @@ fn push_block(
                         text: alt.into(),
                         image,
                         has_image: true,
+                        table: Default::default(),
                     });
                     return;
                 }
@@ -257,6 +259,7 @@ fn push_block(
                 text: code.into(),
                 image: Image::default(),
                 has_image: false,
+                table: Default::default(),
             });
         }
         Pending::List => blocks.push(rich_block(KIND_LIST, 0, src, false)),
@@ -281,12 +284,33 @@ fn push_block(
                 text: plain.into(),
                 image: Image::default(),
                 has_image: false,
+                table: Default::default(),
             });
         }
         Pending::Table => {
             let (header, rows) = parse_table(src);
             let table = render_table(&header, &rows);
-            blocks.push(text_block(KIND_TABLE, 0, table));
+            let rows = std::iter::once((header, true))
+                .chain(rows.into_iter().map(|cells| (cells, false)))
+                .map(|(cells, header)| TableRow {
+                    header,
+                    cells: ModelRc::new(VecModel::from(
+                        cells
+                            .into_iter()
+                            .map(|text| TableCell { text: text.into() })
+                            .collect::<Vec<_>>(),
+                    )),
+                })
+                .collect::<Vec<_>>();
+            blocks.push(Block {
+                kind: KIND_TABLE,
+                level: 0,
+                styled: StyledText::default(),
+                text: table.into(),
+                image: Image::default(),
+                has_image: false,
+                table: ModelRc::new(VecModel::from(rows)),
+            });
         }
         Pending::Html => {
             let trimmed = src.trim();
@@ -306,6 +330,7 @@ fn text_block(kind: i32, level: i32, text: String) -> Block {
         text: text.into(),
         image: Image::default(),
         has_image: false,
+        table: Default::default(),
     }
 }
 
@@ -324,6 +349,7 @@ fn rich_block(kind: i32, level: i32, src: &str, bold: bool) -> Block {
         text: plain.into(),
         image: Image::default(),
         has_image: false,
+        table: Default::default(),
     }
 }
 

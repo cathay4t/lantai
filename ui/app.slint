@@ -1,5 +1,14 @@
 import { ScrollView, Slider, Button, CheckBox, LineEdit } from "std-widgets.slint";
 
+export struct TableCell {
+    text: string,
+}
+
+export struct TableRow {
+    cells: [TableCell],
+    header: bool,
+}
+
 export struct Block {
     kind: int,
     level: int,
@@ -7,6 +16,7 @@ export struct Block {
     text: string,
     image: image,
     has-image: bool,
+    table: [TableRow],
 }
 
 component ColorChannels inherits VerticalLayout {
@@ -439,17 +449,35 @@ export component AppWindow inherits Window {
                         background: root.border;
                     }
                     if block.kind == 6: Rectangle {
-                        background: root.code-bg;
+                        // The grid itself draws the cell separators, so use
+                        // the border color as background and leave 1px gaps.
+                        background: root.border;
                         border-radius: 6px;
                         VerticalLayout {
-                            padding: 10px;
+                            padding: 1px;
                             alignment: start;
-                            SelectableText {
-                                text: block.text;
-                                text-color: root.fg;
-                                selection-color: root.selection;
-                                text-size: root.font-size * 0.92;
-                                text-family: "monospace";
+                            GridLayout {
+                                spacing: 1px;
+                                for row in block.table: Row {
+                                    for cell in row.cells: Rectangle {
+                                        background: row.header ? root.code-bg : root.bg;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            padding-top: 5px;
+                                            padding-bottom: 5px;
+                                            Text {
+                                                text: cell.text;
+                                                color: root.fg;
+                                                font-size: root.font-size * 0.92;
+                                                font-weight: row.header ? 700 : 400;
+                                                wrap: word-wrap;
+                                                vertical-alignment: center;
+                                                min-width: 0px;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
