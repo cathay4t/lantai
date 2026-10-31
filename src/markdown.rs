@@ -1,6 +1,8 @@
 use std::{borrow::Cow, ops::Range, path::Path, sync::OnceLock};
 
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd,
+};
 use slint::{Image, StyledText};
 use syntect::{
     easy::HighlightLines,
@@ -20,16 +22,20 @@ pub const KIND_QUOTE: i32 = 4;
 pub const KIND_RULE: i32 = 5;
 pub const KIND_TABLE: i32 = 6;
 pub const KIND_IMAGE: i32 = 7;
+pub const KIND_ALERT: i32 = 8;
+pub const KIND_FOOTNOTE: i32 = 9;
 
 const PARSER_OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_STRIKETHROUGH)
-    .union(Options::ENABLE_TASKLISTS);
+    .union(Options::ENABLE_TASKLISTS)
+    .union(Options::ENABLE_FOOTNOTES)
+    .union(Options::ENABLE_GFM);
 
 pub fn plain_block(text: &str) -> Block {
     Block {
         kind: KIND_PARAGRAPH,
         level: 0,
-        styled: StyledText::default(),
+        styled: StyledText::from_plain_text(text),
         text: text.into(),
         image: Image::default(),
         has_image: false,
@@ -50,6 +56,12 @@ pub fn blocks_from_markdown(
 ) -> Vec<Block> {
     let syntaxes = syntaxes();
     let theme = theme_for(dark, themes());
+
+    // Footnotes are defined in a separate block, so re-parsing a block on its
+    // own would not resolve its references. Replace them up front with their
+    // Unicode marker, which is also what the styled renderer can display.
+    let resolved = resolve_footnote_references(text);
+    let text = resolved.as_str();
 
     let events: Vec<(Event, Range<usize>)> =
         Parser::new_ext(text, PARSER_OPTIONS)
@@ -91,6 +103,19 @@ pub fn blocks_from_markdown(
             _ => {}
         }
     }
+
+    // Footnote definitions render at the end of the document, regardless of
+    // where they appear in the source.
+    let mut footnotes = Vec::new();
+    blocks.retain(|block| {
+        if block.kind == KIND_FOOTNOTE {
+            footnotes.push(block.clone());
+            false
+        } else {
+            true
+        }
+    });
+    blocks.extend(footnotes);
 
     blocks
 }
@@ -154,7 +179,10 @@ enum Pending {
     Code(String),
     List,
     Quote,
+    Alert(i32),
     Table,
+    Footnote(String),
+    Html,
     Other,
 }
 
@@ -168,10 +196,23 @@ impl Pending {
                 CodeBlockKind::Indented => String::new(),
             }),
             Tag::List(_) => Self::List,
-            Tag::BlockQuote(_) => Self::Quote,
+            Tag::BlockQuote(Some(kind)) => Self::Alert(alert_level(*kind)),
+            Tag::BlockQuote(None) => Self::Quote,
             Tag::Table(_) => Self::Table,
+            Tag::FootnoteDefinition(name) => Self::Footnote(name.to_string()),
+            Tag::HtmlBlock => Self::Html,
             _ => Self::Other,
         }
+    }
+}
+
+fn alert_level(kind: BlockQuoteKind) -> i32 {
+    match kind {
+        BlockQuoteKind::Note => 1,
+        BlockQuoteKind::Tip => 2,
+        BlockQuoteKind::Important => 3,
+        BlockQuoteKind::Warning => 4,
+        BlockQuoteKind::Caution => 5,
     }
 }
 
@@ -200,14 +241,10 @@ fn push_block(
                 blocks.push(plain_block(&alt));
                 return;
             }
-            blocks.push(text_block(KIND_PARAGRAPH, 0, plain_text(src)));
+            blocks.push(rich_block(KIND_PARAGRAPH, 0, src, false));
         }
         Pending::Heading(level) => {
-            blocks.push(text_block(
-                KIND_HEADING,
-                level as i32,
-                plain_text(&heading_text(src)),
-            ));
+            blocks.push(rich_block(KIND_HEADING, level as i32, src, true));
         }
         Pending::Code(info) => {
             let lang = info.split_whitespace().next().unwrap_or("");
@@ -222,14 +259,40 @@ fn push_block(
                 has_image: false,
             });
         }
-        Pending::List => blocks.push(text_block(KIND_LIST, 0, plain_text(src))),
+        Pending::List => blocks.push(rich_block(KIND_LIST, 0, src, false)),
         Pending::Quote => {
-            blocks.push(text_block(KIND_QUOTE, 0, plain_text(&unquote(src))))
+            let body = quote_body(src, false);
+            blocks.push(rich_block(KIND_QUOTE, 0, &body, false));
+        }
+        Pending::Alert(level) => {
+            let body = quote_body(src, true);
+            blocks.push(rich_block(KIND_ALERT, level, &body, false));
+        }
+        Pending::Footnote(name) => {
+            let body = plain_text(src);
+            let styled_body = styled_markdown(src);
+            let marker = superscript(&name);
+            let plain = format!("{marker} {body}");
+            let styled_source = format!("**{marker}** {styled_body}");
+            blocks.push(Block {
+                kind: KIND_FOOTNOTE,
+                level: 0,
+                styled: styled_or_plain(&styled_source, &plain),
+                text: plain.into(),
+                image: Image::default(),
+                has_image: false,
+            });
         }
         Pending::Table => {
             let (header, rows) = parse_table(src);
             let table = render_table(&header, &rows);
             blocks.push(text_block(KIND_TABLE, 0, table));
+        }
+        Pending::Html => {
+            let trimmed = src.trim();
+            if !trimmed.starts_with("<!--") {
+                blocks.push(plain_block(trimmed));
+            }
         }
         Pending::Other => blocks.push(plain_block(src)),
     }
@@ -246,6 +309,189 @@ fn text_block(kind: i32, level: i32, text: String) -> Block {
     }
 }
 
+/// Builds a block that keeps its inline markdown formatting through Slint's
+/// styled-text renderer, while `text` stays plain for selection and copying.
+fn rich_block(kind: i32, level: i32, src: &str, bold: bool) -> Block {
+    let plain = plain_text(src);
+    let mut styled_source = styled_markdown(src);
+    if bold && !styled_source.trim().is_empty() {
+        styled_source = format!("**{}**", styled_source.trim());
+    }
+    Block {
+        kind,
+        level,
+        styled: styled_or_plain(&styled_source, &plain),
+        text: plain.into(),
+        image: Image::default(),
+        has_image: false,
+    }
+}
+
+fn styled_or_plain(styled_source: &str, plain: &str) -> StyledText {
+    StyledText::from_markdown(styled_source)
+        .unwrap_or_else(|_| StyledText::from_plain_text(plain))
+}
+
+/// Renders the inline markdown of a block as Slint styled-text markdown,
+/// preserving emphasis, strikethrough, inline code, links and underline.
+fn styled_markdown(src: &str) -> String {
+    let mut out = String::new();
+    let mut lists: Vec<Option<u64>> = Vec::new();
+    let mut links: Vec<String> = Vec::new();
+    let mut sub = 0usize;
+    let mut sup = 0usize;
+
+    for event in Parser::new_ext(src, PARSER_OPTIONS) {
+        match event {
+            Event::Start(Tag::Item) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                let depth = lists.len().saturating_sub(1);
+                out.push_str(&"    ".repeat(depth));
+                match lists.last_mut() {
+                    Some(Some(number)) => {
+                        out.push_str(&format!("{number}. "));
+                        *number += 1;
+                    }
+                    Some(None) => out.push_str(match depth % 3 {
+                        0 => "• ",
+                        1 => "◦ ",
+                        _ => "▪ ",
+                    }),
+                    None => {}
+                }
+            }
+            Event::End(TagEnd::Item | TagEnd::Paragraph) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Event::Start(Tag::List(start)) => lists.push(start),
+            Event::End(TagEnd::List(_)) => {
+                lists.pop();
+            }
+            Event::Start(Tag::Emphasis) => out.push('*'),
+            Event::End(TagEnd::Emphasis) => out.push('*'),
+            Event::Start(Tag::Strong) => out.push_str("**"),
+            Event::End(TagEnd::Strong) => out.push_str("**"),
+            Event::Start(Tag::Strikethrough) => out.push_str("~~"),
+            Event::End(TagEnd::Strikethrough) => out.push_str("~~"),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                out.push('[');
+                links.push(dest_url.to_string());
+            }
+            Event::End(TagEnd::Link) => {
+                let destination = links.pop().unwrap_or_default();
+                out.push_str(&link_close(&destination));
+            }
+            Event::Start(Tag::Image { .. }) | Event::End(TagEnd::Image) => {}
+            Event::Text(text) => {
+                push_text(&mut out, &text, sub > 0, sup > 0);
+            }
+            Event::Code(code) => out.push_str(&code_span(&code)),
+            Event::SoftBreak => out.push(' '),
+            Event::HardBreak => out.push('\n'),
+            Event::TaskListMarker(checked) => {
+                out.push_str(if checked { "☑ " } else { "☐ " });
+            }
+            Event::FootnoteReference(name) => {
+                out.push_str(&superscript(&name));
+            }
+            Event::InlineHtml(html) => {
+                push_inline_html(&mut out, &html, &mut sub, &mut sup);
+            }
+            _ => {}
+        }
+    }
+
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Emits markdown text, escaping characters that would otherwise be parsed as
+/// formatting. Text inside `<sub>`/`<sup>` is converted to Unicode glyphs,
+/// because Slint's styled-text renderer has no subscript or superscript style.
+fn push_text(out: &mut String, text: &str, sub: bool, sup: bool) {
+    for c in text.chars() {
+        let c = if sub {
+            subscript_char(c)
+        } else if sup {
+            superscript_char(c)
+        } else {
+            c
+        };
+        push_escaped(out, c);
+    }
+}
+
+fn push_escaped(out: &mut String, c: char) {
+    match c {
+        '&' => out.push_str("&amp;"),
+        '<' => out.push_str("&lt;"),
+        '>' => out.push_str("&gt;"),
+        '\\' | '`' | '*' | '_' | '[' | ']' | '#' | '!' | '~' | '|' | '-'
+        | '+' | '(' | ')' => {
+            out.push('\\');
+            out.push(c);
+        }
+        _ => out.push(c),
+    }
+}
+
+/// Handles the handful of inline HTML tags GitHub documents. Unknown tags are
+/// dropped: Slint would otherwise reject the whole styled-text paragraph.
+fn push_inline_html(
+    out: &mut String,
+    html: &str,
+    sub: &mut usize,
+    sup: &mut usize,
+) {
+    let tag = html.trim().to_ascii_lowercase();
+    match tag.as_str() {
+        "<sub>" => *sub += 1,
+        "</sub>" => *sub = sub.saturating_sub(1),
+        "<sup>" => *sup += 1,
+        "</sup>" => *sup = sup.saturating_sub(1),
+        "<ins>" | "<u>" => out.push_str("<u>"),
+        "</ins>" | "</u>" => out.push_str("</u>"),
+        "<b>" | "<strong>" => out.push_str("**"),
+        "</b>" | "</strong>" => out.push_str("**"),
+        "<i>" | "<em>" => out.push('*'),
+        "</i>" | "</em>" => out.push('*'),
+        "<del>" | "<s>" | "<strike>" => out.push_str("~~"),
+        "</del>" | "</s>" | "</strike>" => out.push_str("~~"),
+        "<br>" | "<br/>" | "<br />" => out.push('\n'),
+        _ => {}
+    }
+}
+
+/// Builds the `](destination)` closing of a link.
+fn link_close(dest: &str) -> String {
+    if dest.is_empty() {
+        return "](".to_owned();
+    }
+    let needs_angle = dest.contains([' ', '\t', '(', ')', '<', '>']);
+    if needs_angle {
+        let mut destination = String::from("](<");
+        for c in dest.chars() {
+            match c {
+                '<' => destination.push_str("%3C"),
+                '>' => destination.push_str("%3E"),
+                ' ' => destination.push_str("%20"),
+                '\t' => destination.push_str("%09"),
+                _ => destination.push(c),
+            }
+        }
+        destination.push_str(">)");
+        destination
+    } else {
+        format!("]({dest})")
+    }
+}
+
 /// Renders the markdown of a block as plain text: emphasis and code markers
 /// are dropped and lists become bulleted or numbered lines. Soft line breaks
 /// were already joined with spaces by [`block_source`], hard breaks are kept.
@@ -253,6 +499,8 @@ fn plain_text(src: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     let mut lists: Vec<Option<u64>> = Vec::new();
+    let mut sub = 0usize;
+    let mut sup = 0usize;
 
     for event in Parser::new_ext(src, PARSER_OPTIONS) {
         match event {
@@ -284,7 +532,17 @@ fn plain_text(src: &str) -> String {
             Event::End(TagEnd::List(_)) => {
                 lists.pop();
             }
-            Event::Text(text) => line.push_str(&text),
+            Event::Text(text) => {
+                for c in text.chars() {
+                    line.push(if sub > 0 {
+                        subscript_char(c)
+                    } else if sup > 0 {
+                        superscript_char(c)
+                    } else {
+                        c
+                    });
+                }
+            }
             Event::Code(code) => line.push_str(&code),
             Event::SoftBreak => line.push(' '),
             Event::HardBreak => {
@@ -293,6 +551,12 @@ fn plain_text(src: &str) -> String {
             }
             Event::TaskListMarker(checked) => {
                 line.push_str(if checked { "☑ " } else { "☐ " });
+            }
+            Event::FootnoteReference(name) => {
+                line.push_str(&superscript(&name))
+            }
+            Event::InlineHtml(html) => {
+                push_plain_inline_html(&html, &mut sub, &mut sup, &mut line);
             }
             _ => {}
         }
@@ -304,13 +568,21 @@ fn plain_text(src: &str) -> String {
     lines.join("\n")
 }
 
-fn heading_text(src: &str) -> String {
-    src.trim()
-        .trim_start_matches('#')
-        .trim()
-        .trim_end_matches('#')
-        .trim_end()
-        .to_owned()
+fn push_plain_inline_html(
+    html: &str,
+    sub: &mut usize,
+    sup: &mut usize,
+    line: &mut String,
+) {
+    let tag = html.trim().to_ascii_lowercase();
+    match tag.as_str() {
+        "<sub>" => *sub += 1,
+        "</sub>" => *sub = sub.saturating_sub(1),
+        "<sup>" => *sup += 1,
+        "</sup>" => *sup = sup.saturating_sub(1),
+        "<br>" | "<br/>" | "<br />" => line.push('\n'),
+        _ => {}
+    }
 }
 
 fn unquote(src: &str) -> String {
@@ -324,6 +596,162 @@ fn unquote(src: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Removes the blockquote markers, and for alerts the `[!NOTE]` style first
+/// line, leaving just the alert body.
+fn quote_body(src: &str, alert: bool) -> String {
+    let body = unquote(src);
+    if !alert {
+        return body;
+    }
+    let mut lines = body.lines();
+    match lines.next() {
+        Some(first) if is_alert_marker(first.trim()) => {
+            lines.collect::<Vec<_>>().join("\n")
+        }
+        _ => body,
+    }
+}
+
+fn is_alert_marker(line: &str) -> bool {
+    matches!(
+        line.to_ascii_uppercase().as_str(),
+        "[!NOTE]" | "[!TIP]" | "[!IMPORTANT]" | "[!WARNING]" | "[!CAUTION]"
+    )
+}
+
+/// Wraps inline code in a backtick fence long enough for its contents.
+fn code_span(code: &str) -> String {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for c in code.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "`".repeat(longest + 1);
+    format!("{fence} {code} {fence}")
+}
+
+fn superscript(text: &str) -> String {
+    text.chars().map(superscript_char).collect()
+}
+
+/// Replaces `[^name]` references with Unicode superscript markers. The
+/// replacement is driven by parser offsets, so references inside code spans or
+/// code blocks are left untouched.
+fn resolve_footnote_references(text: &str) -> String {
+    let references: Vec<(Range<usize>, String)> =
+        Parser::new_ext(text, PARSER_OPTIONS)
+            .into_offset_iter()
+            .filter_map(|(event, range)| match event {
+                Event::FootnoteReference(name) => {
+                    Some((range, superscript(&name)))
+                }
+                _ => None,
+            })
+            .collect();
+    if references.is_empty() {
+        return text.to_owned();
+    }
+
+    let mut resolved = String::with_capacity(text.len());
+    let mut position = 0;
+    for (range, marker) in references {
+        resolved.push_str(&text[position..range.start]);
+        resolved.push_str(&marker);
+        position = range.end;
+    }
+    resolved.push_str(&text[position..]);
+    resolved
+}
+
+fn superscript_char(c: char) -> char {
+    match c {
+        '0' => '⁰',
+        '1' => '¹',
+        '2' => '²',
+        '3' => '³',
+        '4' => '⁴',
+        '5' => '⁵',
+        '6' => '⁶',
+        '7' => '⁷',
+        '8' => '⁸',
+        '9' => '⁹',
+        '+' => '⁺',
+        '-' => '⁻',
+        '=' => '⁼',
+        '(' => '⁽',
+        ')' => '⁾',
+        'a' => 'ᵃ',
+        'b' => 'ᵇ',
+        'c' => 'ᶜ',
+        'd' => 'ᵈ',
+        'e' => 'ᵉ',
+        'f' => 'ᶠ',
+        'g' => 'ᵍ',
+        'h' => 'ʰ',
+        'i' => 'ⁱ',
+        'j' => 'ʲ',
+        'k' => 'ᵏ',
+        'l' => 'ˡ',
+        'm' => 'ᵐ',
+        'n' => 'ⁿ',
+        'o' => 'ᵒ',
+        'p' => 'ᵖ',
+        'r' => 'ʳ',
+        's' => 'ˢ',
+        't' => 'ᵗ',
+        'u' => 'ᵘ',
+        'v' => 'ᵛ',
+        'w' => 'ʷ',
+        'x' => 'ˣ',
+        'y' => 'ʸ',
+        'z' => 'ᶻ',
+        _ => c,
+    }
+}
+
+fn subscript_char(c: char) -> char {
+    match c {
+        '0' => '₀',
+        '1' => '₁',
+        '2' => '₂',
+        '3' => '₃',
+        '4' => '₄',
+        '5' => '₅',
+        '6' => '₆',
+        '7' => '₇',
+        '8' => '₈',
+        '9' => '₉',
+        '+' => '₊',
+        '-' => '₋',
+        '=' => '₌',
+        '(' => '₍',
+        ')' => '₎',
+        'a' => 'ₐ',
+        'e' => 'ₑ',
+        'h' => 'ₕ',
+        'i' => 'ᵢ',
+        'j' => 'ⱼ',
+        'k' => 'ₖ',
+        'l' => 'ₗ',
+        'm' => 'ₘ',
+        'n' => 'ₙ',
+        'o' => 'ₒ',
+        'p' => 'ₚ',
+        'r' => 'ᵣ',
+        's' => 'ₛ',
+        't' => 'ₜ',
+        'u' => 'ᵤ',
+        'v' => 'ᵥ',
+        'x' => 'ₓ',
+        _ => c,
+    }
 }
 
 /// Extracts the code inside a fenced or indented code block.
@@ -652,5 +1080,230 @@ mod tests {
         assert_eq!(blocks[0].kind, KIND_CODE);
         assert_eq!(blocks[0].text, "let a = 1;\n");
         assert_ne!(blocks[0].styled, StyledText::default());
+    }
+
+    #[test]
+    fn inline_styles_are_preserved_in_styled_markdown() {
+        assert_eq!(
+            styled_markdown("a **bold** and *italic* and ~~gone~~ and `code`"),
+            "a **bold** and *italic* and ~~gone~~ and ` code `"
+        );
+        assert_eq!(
+            styled_markdown("***all this text is important***"),
+            "***all this text is important***"
+        );
+        assert_eq!(styled_markdown("<ins>under</ins>"), "<u>under</u>");
+        assert_eq!(styled_markdown("a <b>bold</b> word"), "a **bold** word");
+        assert!(
+            StyledText::from_markdown(&styled_markdown(
+                "a **bold** and *italic* and ~~gone~~ and `code`"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn links_are_preserved_in_styled_markdown() {
+        assert_eq!(
+            styled_markdown("[docs](https://example.com/a)"),
+            "[docs](https://example.com/a)"
+        );
+        assert_eq!(
+            styled_markdown("[a b](<https://example.com/a b>)"),
+            "[a b](<https://example.com/a%20b>)"
+        );
+        assert!(
+            StyledText::from_markdown(&styled_markdown(
+                "[docs](https://example.com/a)"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn subscript_superscript_and_task_lists_render() {
+        assert_eq!(plain_text("H<sub>2</sub>O"), "H₂O");
+        assert_eq!(plain_text("E = mc<sup>2</sup>"), "E = mc²");
+        assert_eq!(plain_text("- [x] done\n- [ ] todo"), "• ☑ done\n• ☐ todo");
+        assert!(
+            StyledText::from_markdown(&styled_markdown(
+                "H<sub>2</sub>O and x<sup>2</sup>"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn headings_keep_inline_styles_and_drop_markers() {
+        let blocks =
+            blocks_from_markdown("# A *Helpful* Heading", Path::new("."), true);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, KIND_HEADING);
+        assert_eq!(blocks[0].level, 1);
+        assert_eq!(blocks[0].text, "A Helpful Heading");
+        assert_ne!(blocks[0].styled, StyledText::default());
+    }
+
+    #[test]
+    fn generated_styled_markdown_parses_for_common_syntax() {
+        let samples = [
+            "a **bold** _italic_ ~~strike~~ `code` <ins>in</ins> <sub>s</sub> \
+             <sup>p</sup>",
+            "escaped \\*star\\* and \\[brackets\\]",
+            "[link](https://example.com/a_b?q=1&x=2) and ![alt](img.png)",
+            "***both*** and **bold _nested_ bold**",
+            "a <kbd>Ctrl</kbd>+<kbd>B</kbd> combo",
+            "line one  \nline two",
+            "<!-- hidden --> visible",
+            "H<sub>2</sub>O x<sup>2</sup>",
+        ];
+        for sample in samples {
+            let generated = styled_markdown(sample);
+            assert!(
+                StyledText::from_markdown(&generated).is_ok(),
+                "{sample:?} -> {generated:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gfm_alerts_become_alert_blocks() {
+        let blocks = blocks_from_markdown(
+            "> [!WARNING]\n> This is *urgent*.",
+            Path::new("."),
+            true,
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, KIND_ALERT);
+        assert_eq!(blocks[0].level, 4);
+        assert_eq!(blocks[0].text, "This is urgent.");
+        assert_ne!(blocks[0].styled, StyledText::default());
+    }
+
+    #[test]
+    fn alert_bodies_keep_their_block_content() {
+        let blocks = blocks_from_markdown(
+            "> [!TIP]\n> - one\n> - two",
+            Path::new("."),
+            true,
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, KIND_ALERT);
+        assert_eq!(blocks[0].level, 2);
+        assert_eq!(blocks[0].text, "• one\n• two");
+        assert_ne!(blocks[0].styled, StyledText::default());
+    }
+
+    #[test]
+    fn footnotes_render_references_and_definitions() {
+        let blocks = blocks_from_markdown(
+            "Here is a footnote[^1].\n\n[^1]: My reference.",
+            Path::new("."),
+            true,
+        );
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "Here is a footnote¹.");
+        assert_eq!(blocks[0].kind, KIND_PARAGRAPH);
+        assert_eq!(blocks[1].text, "¹ My reference.");
+        assert_eq!(blocks[1].kind, KIND_FOOTNOTE);
+    }
+
+    #[test]
+    fn footnote_definitions_render_at_the_end() {
+        let blocks = blocks_from_markdown(
+            "[^1]: Defined first.\n\nBody[^1].\n\nLast paragraph.",
+            Path::new("."),
+            true,
+        );
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[2].kind, KIND_FOOTNOTE);
+        assert_eq!(blocks[2].text, "¹ Defined first.");
+    }
+
+    #[test]
+    fn html_comments_are_hidden() {
+        let blocks = blocks_from_markdown(
+            "before\n\n<!-- hidden -->\n\nafter",
+            Path::new("."),
+            true,
+        );
+        assert_eq!(
+            blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(),
+            ["before", "after"]
+        );
+    }
+
+    #[test]
+    fn plain_blocks_render_their_text() {
+        let block = plain_block("failed to read file");
+        assert_eq!(
+            block.styled,
+            StyledText::from_plain_text("failed to read file")
+        );
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn debug_file_table() {
+        let home = std::env::var("HOME").unwrap();
+        let md = std::fs::read_to_string(format!("{home}/linqu_backport.md"))
+            .unwrap();
+        let blocks = blocks_from_markdown(&md, Path::new("."), true);
+        let mut tables = 0;
+        for b in &blocks {
+            if b.kind == 6 {
+                tables += 1;
+                println!(
+                    "TABLE: {:?}",
+                    &b.text.chars().take(80).collect::<String>()
+                );
+            }
+        }
+        println!("table blocks: {tables}, total blocks: {}", blocks.len());
+        for (i, b) in blocks.iter().enumerate() {
+            if b.kind != 6 && b.text.contains('|') {
+                println!(
+                    "SUSPECT block {i}: kind={} text={:?}",
+                    b.kind,
+                    &b.text.chars().take(120).collect::<String>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn debug_all_blocks() {
+        let home = std::env::var("HOME").unwrap();
+        let md = std::fs::read_to_string(format!("{home}/linqu_backport.md"))
+            .unwrap();
+        let blocks = blocks_from_markdown(&md, Path::new("."), true);
+        for (i, b) in blocks.iter().enumerate() {
+            let head: String = b.text.chars().take(70).collect();
+            println!("{i:3} kind={} {:?}", b.kind, head.replace('\n', "\\n"));
+        }
+    }
+
+    #[test]
+    fn debug_real_table() {
+        let md = "\
+## Result summary
+
+| status | count |
+|---|---|
+| picked | 1531 |
+| skip-x86-resctrl-cluster | 102 |
+
+- after
+";
+        let blocks = blocks_from_markdown(md, Path::new("."), true);
+        for b in &blocks {
+            println!("kind={} text={:?}", b.kind, b.text);
+        }
     }
 }

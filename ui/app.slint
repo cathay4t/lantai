@@ -73,6 +73,7 @@ component SelectableText inherits TextInput {
     in property <color> selection-color: #4f7bd0;
     in property <length> text-size: 16px;
     in property <string> text-family: "";
+    in property <int> weight: 400;
     // The code block underlay renders the text; the input on top only shows
     // the selection, so its own text must stay invisible.
     in property <bool> hide-text: false;
@@ -88,6 +89,48 @@ component SelectableText inherits TextInput {
     selection-foreground-color: hide-text ? transparent : text-color;
     font-size: text-size;
     font-family: text-family;
+    font-weight: weight;
+}
+
+// Renders rich inline markdown (emphasis, strikethrough, code, links,
+// underline) with an invisible text input on top so it stays selectable.
+component RichText inherits Rectangle {
+    in property <string> plain;
+    in property <styled-text> styled;
+    in property <color> text-color: #000000;
+    in property <color> link-color: #4f7bd0;
+    in property <color> selection-color: #4f7bd0;
+    in property <length> text-size: 16px;
+    in property <string> text-family: "";
+    in property <int> weight: 400;
+
+    width: 100%;
+    height: rich.preferred-height;
+
+    rich := StyledText {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        text: root.styled;
+        default-color: root.text-color;
+        default-font-family: root.text-family;
+        default-font-size: root.text-size;
+        link-color: root.link-color;
+    }
+
+    SelectableText {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        text: root.plain;
+        hide-text: true;
+        text-color: root.text-color;
+        selection-color: root.selection-color;
+        text-size: root.text-size;
+        text-family: root.text-family;
+        weight: root.weight;
+    }
 }
 
 export component AppWindow inherits Window {
@@ -108,6 +151,22 @@ export component AppWindow inherits Window {
     in-out property <float> accent-g: 123;
     in-out property <float> accent-b: 208;
     in-out property <bool> settings-open: false;
+
+    pure function alert-label(level: int) -> string {
+        if level == 1 { return "Note"; }
+        if level == 2 { return "Tip"; }
+        if level == 3 { return "Important"; }
+        if level == 4 { return "Warning"; }
+        return "Caution";
+    }
+
+    pure function alert-color(level: int) -> color {
+        if level == 1 { return #3b82f6; }
+        if level == 2 { return #22c55e; }
+        if level == 3 { return #a855f7; }
+        if level == 4 { return #f59e0b; }
+        return #ef4444;
+    }
 
     callback settings-changed;
     callback reload-requested;
@@ -153,11 +212,14 @@ export component AppWindow inherits Window {
                 for block in blocks: VerticalLayout {
                     alignment: start;
 
-                    if block.kind == 1: SelectableText {
-                        text: block.text;
+                    if block.kind == 1: RichText {
+                        plain: block.text;
+                        styled: block.styled;
                         text-color: root.fg;
+                        link-color: root.accent;
                         selection-color: root.selection;
                         text-size: root.font-size * (block.level <= 1 ? 1.7 : block.level == 2 ? 1.45 : 1.2);
+                        weight: 700;
                     }
                     if block.kind == 2: Rectangle {
                         background: root.code-bg;
@@ -192,9 +254,11 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    if block.kind == 3: SelectableText {
-                        text: block.text;
+                    if block.kind == 3: RichText {
+                        plain: block.text;
+                        styled: block.styled;
                         text-color: root.fg;
+                        link-color: root.accent;
                         selection-color: root.selection;
                         text-size: root.font-size;
                     }
@@ -207,12 +271,45 @@ export component AppWindow inherits Window {
                                 width: 3px;
                                 background: root.accent;
                             }
-                            SelectableText {
+                            RichText {
                                 width: parent.width - 13px;
-                                text: block.text;
+                                plain: block.text;
+                                styled: block.styled;
                                 text-color: root.fg.mix(root.bg, 0.3);
+                                link-color: root.accent;
                                 selection-color: root.selection;
                                 text-size: root.font-size;
+                            }
+                        }
+                    }
+                    if block.kind == 8: Rectangle {
+                        background: root.code-bg;
+                        border-radius: 6px;
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 10px;
+                            Rectangle {
+                                width: 3px;
+                                background: root.alert-color(block.level);
+                            }
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 4px;
+                                alignment: start;
+                                Text {
+                                    text: root.alert-label(block.level);
+                                    color: root.alert-color(block.level);
+                                    font-size: root.font-size * 0.92;
+                                    font-weight: 700;
+                                }
+                                RichText {
+                                    plain: block.text;
+                                    styled: block.styled;
+                                    text-color: root.fg;
+                                    link-color: root.accent;
+                                    selection-color: root.selection;
+                                    text-size: root.font-size;
+                                }
                             }
                         }
                     }
@@ -240,9 +337,19 @@ export component AppWindow inherits Window {
                         image-fit: contain;
                         max-height: 640px;
                     }
-                    if block.kind == 0: SelectableText {
-                        text: block.text;
+                    if block.kind == 9: RichText {
+                        plain: block.text;
+                        styled: block.styled;
+                        text-color: root.fg.mix(root.bg, 0.35);
+                        link-color: root.accent;
+                        selection-color: root.selection;
+                        text-size: root.font-size * 0.92;
+                    }
+                    if block.kind == 0: RichText {
+                        plain: block.text;
+                        styled: block.styled;
                         text-color: root.fg;
+                        link-color: root.accent;
                         selection-color: root.selection;
                         text-size: root.font-size;
                     }
