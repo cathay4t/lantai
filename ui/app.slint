@@ -210,6 +210,16 @@ export component AppWindow inherits Window {
         scroll.content-y = min(scroll.content-y + line-step, 0px);
     }
 
+    public function scroll-half-page-down() {
+        let half-page = scroll.visible-height / 2;
+        scroll.content-y = max(scroll.content-y - half-page, -max-scroll());
+    }
+
+    public function scroll-half-page-up() {
+        let half-page = scroll.visible-height / 2;
+        scroll.content-y = min(scroll.content-y + half-page, 0px);
+    }
+
     public function scroll-to-top() {
         scroll.content-y = 0px;
     }
@@ -281,6 +291,14 @@ export component AppWindow inherits Window {
                 } else {
                     reject
                 }
+            } else if (event.modifiers.control && event.text == "d") {
+                pending-g = false;
+                root.scroll-half-page-down();
+                accept
+            } else if (event.modifiers.control && event.text == "u") {
+                pending-g = false;
+                root.scroll-half-page-up();
+                accept
             } else if (event.text == "q") {
                 pending-g = false;
                 root.quit-requested();
