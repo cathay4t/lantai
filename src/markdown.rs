@@ -251,18 +251,9 @@ fn push_block(
         Pending::Code(info) => {
             let lang = info.split_whitespace().next().unwrap_or("");
             let code = code_content(src);
-            let styled = highlight_code(&code, lang, syntaxes, theme);
-            blocks.push(Block {
-                kind: KIND_CODE,
-                level: 0,
-                styled,
-                text: code.into(),
-                image: Image::default(),
-                has_image: false,
-                table: Default::default(),
-            });
+            blocks.push(code_block(&code, lang, syntaxes, theme));
         }
-        Pending::List => blocks.push(rich_block(KIND_LIST, 0, src, false)),
+        Pending::List => push_list_blocks(blocks, src, syntaxes, theme),
         Pending::Quote => {
             let body = quote_body(src, false);
             blocks.push(rich_block(KIND_QUOTE, 0, &body, false));
@@ -791,6 +782,141 @@ fn code_content(src: &str) -> String {
     code
 }
 
+/// Finds code blocks nested inside a container such as a list item, returning
+/// the byte range within `src`, the fence's info string, and the code itself.
+fn nested_code_blocks(src: &str) -> Vec<(Range<usize>, String, String)> {
+    let mut found = Vec::new();
+    let mut open: Option<(usize, String, String)> = None;
+    for (event, range) in
+        Parser::new_ext(src, PARSER_OPTIONS).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let info = match kind {
+                    CodeBlockKind::Fenced(info) => info.to_string(),
+                    CodeBlockKind::Indented => String::new(),
+                };
+                open = Some((range.start, info, String::new()));
+            }
+            Event::Text(text) => {
+                if let Some((_, _, code)) = open.as_mut() {
+                    code.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((start, info, code)) = open.take() {
+                    found.push((start..range.end, info, code));
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+fn code_block(
+    code: &str,
+    lang: &str,
+    syntaxes: &SyntaxSet,
+    theme: &Theme,
+) -> Block {
+    Block {
+        kind: KIND_CODE,
+        level: 0,
+        styled: highlight_code(code, lang, syntaxes, theme),
+        text: code.into(),
+        image: Image::default(),
+        has_image: false,
+        table: Default::default(),
+    }
+}
+
+/// Splits a list into blocks, lifting any code blocks nested in its items out
+/// into their own code blocks. Code inside a list item cannot survive being
+/// flattened into the list's styled text.
+fn push_list_blocks(
+    blocks: &mut Vec<Block>,
+    src: &str,
+    syntaxes: &SyntaxSet,
+    theme: &Theme,
+) {
+    let code_blocks = nested_code_blocks(src);
+    if code_blocks.is_empty() {
+        blocks.push(rich_block(KIND_LIST, 0, src, false));
+        return;
+    }
+
+    let items = top_level_items(src);
+    let Some(first) = items.first() else {
+        blocks.push(rich_block(KIND_LIST, 0, src, false));
+        return;
+    };
+
+    let mut group_start = first.start;
+    for item in &items {
+        let nested: Vec<_> = code_blocks
+            .iter()
+            .filter(|(range, _, _)| {
+                item.start <= range.start && range.end <= item.end
+            })
+            .collect();
+        if nested.is_empty() {
+            continue;
+        }
+
+        // Keep the complete items before this one together so their list
+        // spacing is unchanged.
+        let before = src[group_start..item.start].trim_end();
+        if !before.is_empty() {
+            blocks.push(rich_block(KIND_LIST, 0, before, false));
+        }
+
+        let mut cursor = item.start;
+        for (range, info, code) in nested {
+            let before = src[cursor..range.start].trim_end();
+            if !before.trim().is_empty() {
+                blocks.push(rich_block(KIND_LIST, 0, before, false));
+            }
+            let lang = info.split_whitespace().next().unwrap_or("");
+            blocks.push(code_block(code, lang, syntaxes, theme));
+            cursor = range.end;
+        }
+        let after = src[cursor..item.end].trim_start_matches('\n');
+        if !after.trim().is_empty() {
+            blocks.push(rich_block(KIND_LIST, 0, after, false));
+        }
+        group_start = item.end;
+    }
+
+    let tail = src[group_start..].trim_end_matches('\n');
+    if !tail.trim().is_empty() {
+        blocks.push(rich_block(KIND_LIST, 0, tail, false));
+    }
+}
+
+/// Byte ranges of the list's own items, ignoring items of nested lists.
+fn top_level_items(src: &str) -> Vec<Range<usize>> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (event, range) in
+        Parser::new_ext(src, PARSER_OPTIONS).into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::List(_)) => depth += 1,
+            Event::End(TagEnd::List(_)) => depth = depth.saturating_sub(1),
+            Event::Start(Tag::Item) if depth == 1 => start = Some(range.start),
+            Event::End(TagEnd::Item) if depth == 1 => {
+                if let Some(start) = start.take() {
+                    items.push(start..range.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
 fn image_of(src: &str) -> Option<(String, String)> {
     let mut alt = String::new();
     let mut dest = None;
@@ -1313,6 +1439,21 @@ mod debug_tests {
             let head: String = b.text.chars().take(70).collect();
             println!("{i:3} kind={} {:?}", b.kind, head.replace('\n', "\\n"));
         }
+    }
+
+    #[test]
+    fn nested_code_blocks_in_lists_become_their_own_blocks() {
+        let blocks = blocks_from_markdown(
+            "3. Fill x\n   ```c\n   int f();\n   ```\n   after\n4. next\n",
+            Path::new("."),
+            true,
+        );
+        let kinds: Vec<_> = blocks.iter().map(|block| block.kind).collect();
+        assert_eq!(kinds, [KIND_LIST, KIND_CODE, KIND_LIST, KIND_LIST]);
+        assert_eq!(blocks[0].text, "3. Fill x");
+        assert_eq!(blocks[1].text, "int f();\n");
+        assert_eq!(blocks[2].text, "after");
+        assert_eq!(blocks[3].text, "4. next");
     }
 
     #[test]
