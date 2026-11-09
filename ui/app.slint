@@ -94,7 +94,11 @@ component SelectableText inherits TextInput {
     wrap: word-wrap;
     // A viewer has nothing to type, so don't show a blinking caret.
     text-cursor-width: 0px;
-    color: hide-text ? transparent : text-color;
+    // FemtoVG and Skia skip drawing a TextInput entirely when its text color
+    // is fully transparent, which also drops the selection highlight. Keep a
+    // tiny amount of alpha so the selection still renders while the overlay
+    // text stays visually invisible.
+    color: hide-text ? text-color.with-alpha(0.004) : text-color;
     selection-background-color: selection-color;
     selection-foreground-color: hide-text ? transparent : text-color;
     font-size: text-size;
@@ -484,11 +488,12 @@ export component AppWindow inherits Window {
                                             padding-right: 8px;
                                             padding-top: 5px;
                                             padding-bottom: 5px;
-                                            Text {
+                                            SelectableText {
                                                 text: cell.text;
-                                                color: root.fg;
-                                                font-size: root.font-size * 0.92;
-                                                font-weight: row.header ? 700 : 400;
+                                                text-color: root.fg;
+                                                selection-color: root.selection;
+                                                text-size: root.font-size * 0.92;
+                                                weight: row.header ? 700 : 400;
                                                 wrap: word-wrap;
                                                 vertical-alignment: center;
                                                 min-width: 0px;
