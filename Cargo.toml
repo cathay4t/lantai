@@ -8,7 +8,7 @@ license = "Apache-2.0"
 pulldown-cmark = "0.13.4"
 rmsd_yaml = "0.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
-slint = "1.18.1"
+slint = { version = "1.18.1", features = ["unstable-fontique-011"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 unicode-width = "0.2.2"
 

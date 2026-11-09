@@ -20,6 +20,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let path = fs::canonicalize(&path).unwrap_or(path);
 
     let ui = AppWindow::new()?;
+    ui.set_mono_family(monospace_family().into());
     let settings = Settings::load();
     let viewer = Rc::new(RefCell::new(Viewer::new(path, settings)));
     let block_positions = Rc::new(RefCell::new(Vec::<f32>::new()));
@@ -103,6 +104,26 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     ui.run()
+}
+
+/// Resolves the platform's preferred monospace family.
+///
+/// Slint looks up `default-font-family` as a family *name*, so the CSS generic
+/// keyword `"monospace"` falls back to the proportional default font. Asking
+/// the font collection for the generic family yields a concrete name that
+/// Slint can match.
+fn monospace_family() -> String {
+    let mut collection = slint::fontique_011::shared_collection();
+    let families: Vec<_> = collection
+        .generic_families(
+            slint::fontique_011::fontique::GenericFamily::Monospace,
+        )
+        .collect();
+    families
+        .first()
+        .and_then(|family| collection.family_name(*family))
+        .map(str::to_owned)
+        .unwrap_or_else(|| "monospace".to_owned())
 }
 
 fn window_title(path: &Path) -> String {

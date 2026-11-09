@@ -152,6 +152,9 @@ export component AppWindow inherits Window {
     in property <string> doc-title: "lantai";
 
     in-out property <length> font-size: 19px;
+    // Slint treats this as a family *name*, not a CSS generic keyword, so the
+    // concrete monospace family is resolved at startup (see `monospace_family`).
+    in-out property <string> mono-family: "monospace";
     in-out property <bool> dark: true;
     in-out property <bool> custom-fg: false;
     in-out property <bool> custom-bg: false;
@@ -275,7 +278,9 @@ export component AppWindow inherits Window {
     property <color> bg: custom-bg ? rgb(bg-r, bg-g, bg-b) : (dark ? #000000 : #ffffff);
     property <color> accent: rgb(accent-r, accent-g, accent-b);
     property <color> selection: accent.with-alpha(0.4);
-    property <color> code-bg: dark ? bg.brighter(0.14) : bg.darker(0.06);
+    // Mixing a little foreground into the background keeps the block visible
+    // even when the background is pure black, where `brighter()` is a no-op.
+    property <color> code-bg: fg.mix(bg, dark ? 0.10 : 0.06);
     property <color> panel-bg: dark ? #1e1e1e : #f2f2f2;
     property <color> border: fg.mix(bg, 0.75);
 
@@ -390,7 +395,7 @@ export component AppWindow inherits Window {
                                     width: parent.width;
                                     text: block.styled;
                                     default-color: root.fg;
-                                    default-font-family: "monospace";
+                                    default-font-family: root.mono-family;
                                     default-font-size: root.font-size * 0.92;
                                 }
                                 SelectableText {
@@ -402,7 +407,7 @@ export component AppWindow inherits Window {
                                     hide-text: true;
                                     selection-color: root.selection;
                                     text-size: root.font-size * 0.92;
-                                    text-family: "monospace";
+                                    text-family: root.mono-family;
                                 }
                             }
                         }
