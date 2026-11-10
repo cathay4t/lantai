@@ -353,6 +353,10 @@ export component AppWindow inherits Window {
             // never overflows sideways and no horizontal scrollbar shows up.
             content-width: self.visible-width;
             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            // The built-in Fluent scrollbar is drawn with FluentPalette.border,
+            // which is almost invisible on a black background and can't be
+            // recolored from here. Use the custom overlay bar below instead.
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
             VerticalLayout {
                 width: root.width;
@@ -529,6 +533,58 @@ export component AppWindow inherits Window {
                         link-color: root.accent;
                         selection-color: root.selection;
                         text-size: root.font-size;
+                    }
+                }
+            }
+        }
+
+        // Custom scrollbar: brighter than the Fluent default and draggable.
+        scrollbar := Rectangle {
+            x: root.width - 10px;
+            y: 4px;
+            width: 8px;
+            height: root.height - 8px;
+            background: transparent;
+            visible: scroll.content-height > scroll.visible-height;
+
+            property <length> track: self.height;
+            property <length> overshoot: max(scroll.content-height - scroll.visible-height, 0px);
+            property <length> thumb-height: min(self.track, max(28px, self.track * (scroll.visible-height / max(scroll.content-height, 1px))));
+            property <length> drag-start-y: 0px;
+            property <length> drag-start-content: 0px;
+
+            thumb := Rectangle {
+                x: 1px;
+                width: 6px;
+                height: scrollbar.thumb-height;
+                y: scrollbar.overshoot > 0px && scrollbar.track > self.height
+                    ? (scrollbar.track - self.height) * (-scroll.content-y / scrollbar.overshoot)
+                    : 0px;
+                border-radius: 3px;
+                background: touch.has-hover || touch.pressed
+                    ? root.fg.mix(root.bg, 0.75)
+                    : root.fg.mix(root.bg, 0.45);
+            }
+
+            touch := TouchArea {
+                width: parent.width;
+                height: parent.height;
+
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        scrollbar.drag-start-y = self.mouse-y;
+                        scrollbar.drag-start-content = scroll.content-y;
+                    }
+                }
+
+                moved => {
+                    if (self.pressed && scrollbar.overshoot > 0px && scrollbar.track > scrollbar.thumb-height) {
+                        let delta = self.mouse-y - scrollbar.drag-start-y;
+                        scroll.content-y = clamp(
+                            scrollbar.drag-start-content - delta * (scrollbar.overshoot / (scrollbar.track - scrollbar.thumb-height)),
+                            -scrollbar.overshoot,
+                            0px
+                        );
                     }
                 }
             }
