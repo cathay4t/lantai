@@ -77,11 +77,15 @@ fn main() -> Result<(), slint::PlatformError> {
         match result {
             Some((index, ordinal, total)) => {
                 ui.set_search_status(format!("{ordinal}/{total}").into());
+                ui.set_search_match(index as i32);
                 if let Some(&y) = positions.borrow().get(index) {
                     ui.invoke_scroll_to_position(y);
                 }
             }
-            None => ui.set_search_status("no matches".into()),
+            None => {
+                ui.set_search_status("no matches".into());
+                ui.set_search_match(-1);
+            }
         }
     });
 
@@ -352,6 +356,7 @@ impl Viewer {
             blocks.iter().map(|block| block.text.to_string()).collect();
         self.search_query.clear();
         self.search_from = None;
+        ui.set_search_match(-1);
         ui.set_blocks(ModelRc::new(VecModel::from(blocks)));
     }
 
