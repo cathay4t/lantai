@@ -9,6 +9,11 @@ export struct TableRow {
     header: bool,
 }
 
+export struct SearchHighlight {
+    start: int,
+    end: int,
+}
+
 export struct Block {
     kind: int,
     level: int,
@@ -17,6 +22,7 @@ export struct Block {
     image: image,
     has-image: bool,
     table: [TableRow],
+    highlights: [SearchHighlight],
 }
 
 component ColorChannels inherits VerticalLayout {
@@ -87,6 +93,9 @@ component SelectableText inherits TextInput {
     // The code block underlay renders the text; the input on top only shows
     // the selection, so its own text must stay invisible.
     in property <bool> hide-text: false;
+    // Byte range [start, end] of a search match to show as a selection, or an
+    // empty array when nothing should be highlighted.
+    in property <[int]> highlight: [];
 
     width: 100%;
     read-only: true;
@@ -104,6 +113,23 @@ component SelectableText inherits TextInput {
     font-size: text-size;
     font-family: text-family;
     font-weight: weight;
+
+    // Highlighting a search match reuses the text selection so only the
+    // matched characters are painted, not the whole block.
+    function apply-highlight() {
+        if (self.highlight.length == 2 && self.highlight[1] > self.highlight[0]) {
+            self.set-selection-offsets(self.highlight[0], self.highlight[1]);
+        } else {
+            self.clear-selection();
+        }
+    }
+
+    init => {
+        root.apply-highlight();
+    }
+    changed highlight => {
+        root.apply-highlight();
+    }
 }
 
 // Renders rich inline markdown (emphasis, strikethrough, code, links,
@@ -117,6 +143,8 @@ component RichText inherits Rectangle {
     in property <length> text-size: 16px;
     in property <string> text-family: "";
     in property <int> weight: 400;
+    in property <[int]> highlight: [];
+    in property <[SearchHighlight]> other-highlights: [];
 
     width: 100%;
     height: rich.preferred-height;
@@ -132,6 +160,23 @@ component RichText inherits Rectangle {
         link-color: root.link-color;
     }
 
+    // Every other match in this block, painted lighter than the focused one.
+    for h in other-highlights: SelectableText {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        text: root.plain;
+        hide-text: true;
+        enabled: false;
+        text-color: root.text-color;
+        selection-color: root.selection-color.with-alpha(0.18);
+        text-size: root.text-size;
+        text-family: root.text-family;
+        weight: root.weight;
+        highlight: [h.start, h.end];
+    }
+
     SelectableText {
         x: 0;
         y: 0;
@@ -144,6 +189,7 @@ component RichText inherits Rectangle {
         text-size: root.text-size;
         text-family: root.text-family;
         weight: root.weight;
+        highlight: root.highlight;
     }
 }
 
@@ -173,6 +219,11 @@ export component AppWindow inherits Window {
     in-out property <string> search-status: "";
     // Index of the block containing the current search match, or -1.
     in-out property <int> search-match: -1;
+    // Byte range [start, end] of the match within that block, or an empty
+    // array when there is no match.
+    in-out property <[int]> search-highlight-range: [];
+    // Last committed search, used by n/N even after the search box closes.
+    in-out property <string> last-search-query: "";
     in-out property <int> measure-tick: 0;
 
     property <length> line-step: root.font-size * 1.5;
@@ -244,7 +295,6 @@ export component AppWindow inherits Window {
     public function open-search() {
         search-query = "";
         search-status = "";
-        search-match = -1;
         search-open = true;
     }
 
@@ -281,7 +331,6 @@ export component AppWindow inherits Window {
     property <color> bg: custom-bg ? rgb(bg-r, bg-g, bg-b) : (dark ? #000000 : #ffffff);
     property <color> accent: rgb(accent-r, accent-g, accent-b);
     property <color> selection: accent.with-alpha(0.4);
-    property <color> match-highlight: accent.with-alpha(0.18);
     // Mixing a little foreground into the background keeps the block visible
     // even when the background is pure black, where `brighter()` is a no-op.
     property <color> code-bg: fg.mix(bg, dark ? 0.10 : 0.06);
@@ -336,6 +385,18 @@ export component AppWindow inherits Window {
                     pending-g = true;
                 }
                 accept
+            } else if (event.text == "n") {
+                pending-g = false;
+                if (!root.last-search-query.is-empty) {
+                    root.search-requested(root.last-search-query, true);
+                }
+                accept
+            } else if (event.text == "N") {
+                pending-g = false;
+                if (!root.last-search-query.is-empty) {
+                    root.search-requested(root.last-search-query, false);
+                }
+                accept
             } else if (event.text == "/" || (event.modifiers.control && event.text == "f")) {
                 pending-g = false;
                 root.open-search();
@@ -368,9 +429,8 @@ export component AppWindow inherits Window {
                 padding: 18px;
                 spacing: 10px;
 
-                for block[index] in blocks: Rectangle {
-                    background: index == root.search-match ? root.match-highlight : transparent;
-                    border-radius: 6px;
+                for block[index] in blocks: VerticalLayout {
+                    alignment: start;
                     // Layout geometry changes don't emit change notifications,
                     // so sample each block's position whenever the root asks
                     // for a fresh measurement (after load, resize, font change).
@@ -379,177 +439,191 @@ export component AppWindow inherits Window {
                         root.block-positioned(index, self.y);
                     }
 
-                    if index == root.search-match: Rectangle {
-                        x: -8px;
-                        width: 3px;
-                        height: parent.height;
-                        border-radius: 1.5px;
-                        background: root.accent;
+                    if block.kind == 1: RichText {
+                        plain: block.text;
+                        styled: block.styled;
+                        text-color: root.fg;
+                        link-color: root.accent;
+                        selection-color: root.selection;
+                        text-size: root.font-size * (block.level <= 1 ? 1.7 : block.level == 2 ? 1.45 : 1.2);
+                        weight: 700;
+                        highlight: index == root.search-match ? root.search-highlight-range : [];
+                        other-highlights: block.highlights;
                     }
-
-                    VerticalLayout {
-                        alignment: start;
-
-                        if block.kind == 1: RichText {
-                            plain: block.text;
-                            styled: block.styled;
-                            text-color: root.fg;
-                            link-color: root.accent;
-                            selection-color: root.selection;
-                            text-size: root.font-size * (block.level <= 1 ? 1.7 : block.level == 2 ? 1.45 : 1.2);
-                            weight: 700;
-                        }
-                        if block.kind == 2: Rectangle {
-                            background: root.code-bg;
-                            border-radius: 6px;
-                            VerticalLayout {
-                                padding: 10px;
-                                alignment: start;
-                                Rectangle {
-                                    // The highlighted text defines the height; the
-                                    // transparent input on top handles selection.
-                                    height: code-text.preferred-height;
-                                    code-text := StyledText {
-                                        x: 0;
-                                        y: 0;
-                                        width: parent.width;
-                                        text: block.styled;
-                                        default-color: root.fg;
-                                        default-font-family: root.mono-family;
-                                        default-font-size: root.font-size * 0.92;
-                                    }
-                                    SelectableText {
-                                        x: 0;
-                                        y: 0;
-                                        width: parent.width;
-                                        height: parent.height;
-                                        text: block.text;
-                                        hide-text: true;
-                                        selection-color: root.selection;
-                                        text-size: root.font-size * 0.92;
-                                        text-family: root.mono-family;
-                                    }
+                    if block.kind == 2: Rectangle {
+                        background: root.code-bg;
+                        border-radius: 6px;
+                        VerticalLayout {
+                            padding: 10px;
+                            alignment: start;
+                            Rectangle {
+                                // The highlighted text defines the height; the
+                                // transparent input on top handles selection.
+                                height: code-text.preferred-height;
+                                code-text := StyledText {
+                                    x: 0;
+                                    y: 0;
+                                    width: parent.width;
+                                    text: block.styled;
+                                    default-color: root.fg;
+                                    default-font-family: root.mono-family;
+                                    default-font-size: root.font-size * 0.92;
+                                }
+                                for h in block.highlights: SelectableText {
+                                    x: 0;
+                                    y: 0;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: block.text;
+                                    hide-text: true;
+                                    enabled: false;
+                                    selection-color: root.selection.with-alpha(0.18);
+                                    text-size: root.font-size * 0.92;
+                                    text-family: root.mono-family;
+                                    highlight: [h.start, h.end];
+                                }
+                                SelectableText {
+                                    x: 0;
+                                    y: 0;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: block.text;
+                                    hide-text: true;
+                                    selection-color: root.selection;
+                                    text-size: root.font-size * 0.92;
+                                    text-family: root.mono-family;
+                                    highlight: index == root.search-match ? root.search-highlight-range : [];
                                 }
                             }
                         }
-                        if block.kind == 3: RichText {
-                            plain: block.text;
-                            styled: block.styled;
-                            text-color: root.fg;
-                            link-color: root.accent;
-                            selection-color: root.selection;
-                            text-size: root.font-size;
+                    }
+                    if block.kind == 3: RichText {
+                        plain: block.text;
+                        styled: block.styled;
+                        text-color: root.fg;
+                        link-color: root.accent;
+                        selection-color: root.selection;
+                        text-size: root.font-size;
+                        highlight: index == root.search-match ? root.search-highlight-range : [];
+                        other-highlights: block.highlights;
+                    }
+                    if block.kind == 4: Rectangle {
+                        background: transparent;
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 10px;
+                            Rectangle {
+                                width: 3px;
+                                background: root.accent;
+                            }
+                            RichText {
+                                width: parent.width - 13px;
+                                plain: block.text;
+                                styled: block.styled;
+                                text-color: root.fg.mix(root.bg, 0.3);
+                                link-color: root.accent;
+                                selection-color: root.selection;
+                                text-size: root.font-size;
+                                highlight: index == root.search-match ? root.search-highlight-range : [];
+                                other-highlights: block.highlights;
+                            }
                         }
-                        if block.kind == 4: Rectangle {
-                            background: transparent;
-                            HorizontalLayout {
+                    }
+                    if block.kind == 8: Rectangle {
+                        background: root.code-bg;
+                        border-radius: 6px;
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 10px;
+                            Rectangle {
+                                width: 3px;
+                                background: root.alert-color(block.level);
+                            }
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 4px;
                                 alignment: start;
-                                spacing: 10px;
-                                Rectangle {
-                                    width: 3px;
-                                    background: root.accent;
+                                Text {
+                                    text: root.alert-label(block.level);
+                                    color: root.alert-color(block.level);
+                                    font-size: root.font-size * 0.92;
+                                    font-weight: 700;
                                 }
                                 RichText {
-                                    width: parent.width - 13px;
                                     plain: block.text;
                                     styled: block.styled;
-                                    text-color: root.fg.mix(root.bg, 0.3);
+                                    text-color: root.fg;
                                     link-color: root.accent;
                                     selection-color: root.selection;
                                     text-size: root.font-size;
+                                    highlight: index == root.search-match ? root.search-highlight-range : [];
+                                    other-highlights: block.highlights;
                                 }
                             }
                         }
-                        if block.kind == 8: Rectangle {
-                            background: root.code-bg;
-                            border-radius: 6px;
-                            HorizontalLayout {
-                                alignment: start;
-                                spacing: 10px;
-                                Rectangle {
-                                    width: 3px;
-                                    background: root.alert-color(block.level);
-                                }
-                                VerticalLayout {
-                                    padding: 10px;
-                                    spacing: 4px;
-                                    alignment: start;
-                                    Text {
-                                        text: root.alert-label(block.level);
-                                        color: root.alert-color(block.level);
-                                        font-size: root.font-size * 0.92;
-                                        font-weight: 700;
-                                    }
-                                    RichText {
-                                        plain: block.text;
-                                        styled: block.styled;
-                                        text-color: root.fg;
-                                        link-color: root.accent;
-                                        selection-color: root.selection;
-                                        text-size: root.font-size;
-                                    }
-                                }
-                            }
-                        }
-                        if block.kind == 5: Rectangle {
-                            height: 1px;
-                            background: root.border;
-                        }
-                        if block.kind == 6: Rectangle {
-                            // The grid itself draws the cell separators, so use
-                            // the border color as background and leave 1px gaps.
-                            background: root.border;
-                            border-radius: 6px;
-                            VerticalLayout {
-                                padding: 1px;
-                                alignment: start;
-                                GridLayout {
-                                    spacing: 1px;
-                                    for row in block.table: Row {
-                                        for cell in row.cells: Rectangle {
-                                            background: row.header ? root.code-bg : root.bg;
-                                            HorizontalLayout {
-                                                padding-left: 8px;
-                                                padding-right: 8px;
-                                                padding-top: 5px;
-                                                padding-bottom: 5px;
-                                                SelectableText {
-                                                    text: cell.text;
-                                                    text-color: root.fg;
-                                                    selection-color: root.selection;
-                                                    text-size: root.font-size * 0.92;
-                                                    weight: row.header ? 700 : 400;
-                                                    wrap: word-wrap;
-                                                    vertical-alignment: center;
-                                                    min-width: 0px;
-                                                }
+                    }
+                    if block.kind == 5: Rectangle {
+                        height: 1px;
+                        background: root.border;
+                    }
+                    if block.kind == 6: Rectangle {
+                        // The grid itself draws the cell separators, so use
+                        // the border color as background and leave 1px gaps.
+                        background: root.border;
+                        border-radius: 6px;
+                        VerticalLayout {
+                            padding: 1px;
+                            alignment: start;
+                            GridLayout {
+                                spacing: 1px;
+                                for row in block.table: Row {
+                                    for cell in row.cells: Rectangle {
+                                        background: row.header ? root.code-bg : root.bg;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            padding-top: 5px;
+                                            padding-bottom: 5px;
+                                            SelectableText {
+                                                text: cell.text;
+                                                text-color: root.fg;
+                                                selection-color: root.selection;
+                                                text-size: root.font-size * 0.92;
+                                                weight: row.header ? 700 : 400;
+                                                wrap: word-wrap;
+                                                vertical-alignment: center;
+                                                min-width: 0px;
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        if block.kind == 7 && block.has-image: Image {
-                            source: block.image;
-                            image-fit: contain;
-                            max-height: 640px;
-                        }
-                        if block.kind == 9: RichText {
-                            plain: block.text;
-                            styled: block.styled;
-                            text-color: root.fg.mix(root.bg, 0.35);
-                            link-color: root.accent;
-                            selection-color: root.selection;
-                            text-size: root.font-size * 0.92;
-                        }
-                        if block.kind == 0: RichText {
-                            plain: block.text;
-                            styled: block.styled;
-                            text-color: root.fg;
-                            link-color: root.accent;
-                            selection-color: root.selection;
-                            text-size: root.font-size;
-                        }
+                    }
+                    if block.kind == 7 && block.has-image: Image {
+                        source: block.image;
+                        image-fit: contain;
+                        max-height: 640px;
+                    }
+                    if block.kind == 9: RichText {
+                        plain: block.text;
+                        styled: block.styled;
+                        text-color: root.fg.mix(root.bg, 0.35);
+                        link-color: root.accent;
+                        selection-color: root.selection;
+                        text-size: root.font-size * 0.92;
+                        highlight: index == root.search-match ? root.search-highlight-range : [];
+                        other-highlights: block.highlights;
+                    }
+                    if block.kind == 0: RichText {
+                        plain: block.text;
+                        styled: block.styled;
+                        text-color: root.fg;
+                        link-color: root.accent;
+                        selection-color: root.selection;
+                        text-size: root.font-size;
+                        highlight: index == root.search-match ? root.search-highlight-range : [];
+                        other-highlights: block.highlights;
                     }
                 }
             }
@@ -799,7 +873,11 @@ export component AppWindow inherits Window {
                 text <=> root.search-query;
                 placeholder-text: "Search";
                 accepted(text) => {
+                    root.last-search-query = text;
                     root.search-requested(text, true);
+                    // Return focus to the document so navigation keys and
+                    // n/N keep working after committing the search.
+                    root.close-search();
                 }
                 key-pressed(event) => {
                     if (event.text == Key.Escape) {

@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use slint::{ModelRc, VecModel};
+use slint::{Model, ModelRc, VecModel};
 
 slint::include_modules!();
 
@@ -73,18 +73,35 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        let result = state.borrow_mut().search(query.as_str(), forward);
+        let (result, matches, current) = {
+            let mut viewer = state.borrow_mut();
+            let result = viewer.search(query.as_str(), forward);
+            (result, viewer.search_matches.clone(), viewer.search_from)
+        };
+        update_block_highlights(
+            &ui,
+            &matches,
+            if result.is_some() { current } else { None },
+        );
         match result {
-            Some((index, ordinal, total)) => {
-                ui.set_search_status(format!("{ordinal}/{total}").into());
-                ui.set_search_match(index as i32);
-                if let Some(&y) = positions.borrow().get(index) {
+            Some(hit) => {
+                ui.set_search_status(
+                    format!("{}/{}", hit.ordinal, hit.total).into(),
+                );
+                ui.set_search_match(hit.block as i32);
+                ui.set_search_highlight_range(ModelRc::new(VecModel::from(
+                    vec![hit.start as i32, hit.end as i32],
+                )));
+                if let Some(&y) = positions.borrow().get(hit.block) {
                     ui.invoke_scroll_to_position(y);
                 }
             }
             None => {
                 ui.set_search_status("no matches".into());
                 ui.set_search_match(-1);
+                ui.set_search_highlight_range(ModelRc::new(VecModel::from(
+                    Vec::<i32>::new(),
+                )));
             }
         }
     });
@@ -294,7 +311,15 @@ struct Viewer {
     settings: Settings,
     block_texts: Vec<String>,
     search_query: String,
+    search_matches: Vec<SearchMatch>,
     search_from: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct SearchMatch {
+    block: usize,
+    start: usize,
+    end: usize,
 }
 
 impl Viewer {
@@ -306,6 +331,7 @@ impl Viewer {
             settings,
             block_texts: Vec::new(),
             search_query: String::new(),
+            search_matches: Vec::new(),
             search_from: None,
         }
     }
@@ -355,8 +381,12 @@ impl Viewer {
         self.block_texts =
             blocks.iter().map(|block| block.text.to_string()).collect();
         self.search_query.clear();
+        self.search_matches.clear();
         self.search_from = None;
         ui.set_search_match(-1);
+        ui.set_search_highlight_range(ModelRc::new(VecModel::from(
+            Vec::<i32>::new(),
+        )));
         ui.set_blocks(ModelRc::new(VecModel::from(blocks)));
     }
 
@@ -365,53 +395,134 @@ impl Viewer {
         self.update_blocks(ui);
     }
 
-    /// Finds the next block containing `query` in the requested direction and
-    /// returns `(block index, match ordinal, total matches)`.
-    fn search(
-        &mut self,
-        query: &str,
-        forward: bool,
-    ) -> Option<(usize, usize, usize)> {
+    /// Finds the next occurrence of `query` in the requested direction.
+    fn search(&mut self, query: &str, forward: bool) -> Option<SearchHit> {
         if query != self.search_query {
             self.search_query = query.to_owned();
+            self.search_matches =
+                find_all_case_insensitive(&self.block_texts, query);
             self.search_from = None;
         }
-        let needle = query.to_lowercase();
-        if needle.is_empty() || self.block_texts.is_empty() {
-            return None;
-        }
-
-        let matches: Vec<bool> = self
-            .block_texts
-            .iter()
-            .map(|text| text.to_lowercase().contains(&needle))
-            .collect();
-        let total = matches.iter().filter(|matched| **matched).count();
+        let total = self.search_matches.len();
         if total == 0 {
             return None;
         }
 
-        let count = matches.len();
-        let start = match (self.search_from, forward) {
+        let index = match (self.search_from, forward) {
             (None, true) => 0,
-            (None, false) => count - 1,
-            (Some(index), true) => (index + 1) % count,
-            (Some(index), false) => (index + count - 1) % count,
+            (None, false) => total - 1,
+            (Some(index), true) => (index + 1) % total,
+            (Some(index), false) => (index + total - 1) % total,
         };
-        let index = (0..count).find_map(|offset| {
-            let index = if forward {
-                (start + offset) % count
-            } else {
-                (start + count - offset) % count
-            };
-            matches[index].then_some(index)
-        })?;
-
         self.search_from = Some(index);
-        let ordinal =
-            matches[..=index].iter().filter(|matched| **matched).count();
-        Some((index, ordinal, total))
+
+        let hit = self.search_matches[index];
+        Some(SearchHit {
+            block: hit.block,
+            ordinal: index + 1,
+            total,
+            start: hit.start,
+            end: hit.end,
+        })
     }
+}
+
+struct SearchHit {
+    block: usize,
+    ordinal: usize,
+    total: usize,
+    start: usize,
+    end: usize,
+}
+
+/// Stores every non-focused match in its block so the UI can paint them all,
+/// with the focused match handled separately by `search-match`.
+fn update_block_highlights(
+    ui: &AppWindow,
+    matches: &[SearchMatch],
+    current: Option<usize>,
+) {
+    let model = ui.get_blocks();
+    let count = model.row_count();
+    let mut per_block: Vec<Vec<SearchHighlight>> = vec![Vec::new(); count];
+    for (index, hit) in matches.iter().enumerate() {
+        if current == Some(index) || hit.block >= count {
+            continue;
+        }
+        per_block[hit.block].push(SearchHighlight {
+            start: hit.start as i32,
+            end: hit.end as i32,
+        });
+    }
+
+    for (index, ranges) in per_block.into_iter().enumerate() {
+        let Some(mut block) = model.row_data(index) else {
+            continue;
+        };
+        let unchanged = block.highlights.row_count() == ranges.len()
+            && block.highlights.iter().zip(&ranges).all(|(have, want)| {
+                have.start == want.start && have.end == want.end
+            });
+        if unchanged {
+            continue;
+        }
+        block.highlights = ModelRc::new(VecModel::from(ranges));
+        model.set_row_data(index, block);
+    }
+}
+
+/// Finds every occurrence of `needle` across `blocks`, ignoring case, in
+/// document order. Ranges are byte offsets into each block's text.
+fn find_all_case_insensitive(
+    blocks: &[String],
+    needle: &str,
+) -> Vec<SearchMatch> {
+    let needle = needle.to_lowercase();
+    let mut matches = Vec::new();
+    if needle.is_empty() {
+        return matches;
+    }
+    for (block, text) in blocks.iter().enumerate() {
+        for (start, end) in find_ranges(text, &needle) {
+            matches.push(SearchMatch { block, start, end });
+        }
+    }
+    matches
+}
+
+/// Returns the byte ranges in `haystack` that match the already-lowercased
+/// `needle`, mapping positions in the lowercased text back to the original.
+fn find_ranges(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+    let mut lowered = String::with_capacity(haystack.len());
+    // Maps each byte offset in `lowered` to the byte offset of the original
+    // character that produced it, plus one entry for the end of the text.
+    let mut boundaries = Vec::with_capacity(haystack.len() + 1);
+    for (offset, ch) in haystack.char_indices() {
+        boundaries.push((lowered.len(), offset));
+        for lower in ch.to_lowercase() {
+            lowered.push(lower);
+        }
+    }
+    boundaries.push((lowered.len(), haystack.len()));
+
+    let map_offset = |lower: usize| {
+        boundaries
+            .binary_search_by_key(&lower, |&(lo, _)| lo)
+            .ok()
+            .map(|index| boundaries[index].1)
+    };
+
+    let mut ranges = Vec::new();
+    let mut search_from = 0;
+    while let Some(position) = lowered[search_from..].find(needle) {
+        let start = search_from + position;
+        let end = start + needle.len();
+        if let (Some(start), Some(end)) = (map_offset(start), map_offset(end)) {
+            ranges.push((start, end));
+        }
+        search_from = end.max(start + 1);
+    }
+    ranges
 }
 
 fn default_text_color(theme: Theme) -> [u8; 3] {
@@ -430,7 +541,7 @@ fn default_background(theme: Theme) -> [u8; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, Theme, parse_font_size};
+    use super::{Settings, Theme, find_all_case_insensitive, parse_font_size};
 
     #[test]
     fn settings_round_trip() {
@@ -464,5 +575,30 @@ mod tests {
         assert_eq!(parse_font_size("Adwaita Sans 11"), Some(11.0));
         assert_eq!(parse_font_size("Noto Sans CJK SC 10.5"), Some(10.5));
         assert_eq!(parse_font_size("Sans"), None);
+    }
+
+    #[test]
+    fn finds_case_insensitive_match_ranges() {
+        let blocks = |texts: &[&str]| {
+            texts
+                .iter()
+                .map(|text| text.to_string())
+                .collect::<Vec<_>>()
+        };
+        let ranges = |texts: &[&str], needle: &str| {
+            find_all_case_insensitive(&blocks(texts), needle)
+                .into_iter()
+                .map(|m| (m.block, m.start, m.end))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ranges(&["hello wait world"], "wait"), vec![(0, 6, 10)]);
+        assert_eq!(ranges(&["Waiting here"], "wait"), vec![(0, 0, 4)]);
+        assert_eq!(ranges(&["nothing here"], "wait"), Vec::new());
+        assert_eq!(ranges(&["héllo wáit"], "wáit"), vec![(0, 7, 12)]);
+        assert_eq!(
+            ranges(&["wait and wait", "wait"], "wait"),
+            vec![(0, 0, 4), (0, 9, 13), (1, 0, 4)]
+        );
     }
 }

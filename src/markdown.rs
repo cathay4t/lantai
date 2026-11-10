@@ -40,6 +40,7 @@ pub fn plain_block(text: &str) -> Block {
         image: Image::default(),
         has_image: false,
         table: Default::default(),
+        highlights: Default::default(),
     }
 }
 
@@ -237,6 +238,7 @@ fn push_block(
                         image,
                         has_image: true,
                         table: Default::default(),
+                        highlights: Default::default(),
                     });
                     return;
                 }
@@ -276,6 +278,7 @@ fn push_block(
                 image: Image::default(),
                 has_image: false,
                 table: Default::default(),
+                highlights: Default::default(),
             });
         }
         Pending::Table => {
@@ -301,6 +304,7 @@ fn push_block(
                 image: Image::default(),
                 has_image: false,
                 table: ModelRc::new(VecModel::from(rows)),
+                highlights: Default::default(),
             });
         }
         Pending::Html => {
@@ -322,6 +326,7 @@ fn text_block(kind: i32, level: i32, text: String) -> Block {
         image: Image::default(),
         has_image: false,
         table: Default::default(),
+        highlights: Default::default(),
     }
 }
 
@@ -341,6 +346,7 @@ fn rich_block(kind: i32, level: i32, src: &str, bold: bool) -> Block {
         image: Image::default(),
         has_image: false,
         table: Default::default(),
+        highlights: Default::default(),
     }
 }
 
@@ -828,6 +834,7 @@ fn code_block(
         image: Image::default(),
         has_image: false,
         table: Default::default(),
+        highlights: Default::default(),
     }
 }
 
